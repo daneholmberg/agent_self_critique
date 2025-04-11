@@ -1,10 +1,12 @@
 import re
 from typing import Dict, Optional
+from pathlib import Path
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agents.manim_agent import config as agent_cfg
 from core.graph_state import GraphState
+from core.log_utils import log_run_details
 
 
 class ManimCodeGenerator:
@@ -48,8 +50,6 @@ class ManimCodeGenerator:
         prompt_lines = [
             f"You are a Manim v0.19 expert. Generate Python code for a Manim CE scene named '{agent_cfg.GENERATED_SCENE_NAME}'.",
             "Follow the instructions in the provided Manim documentation context precisely.",
-            "The code should visualize the following script segment:",
-            f'"""\n{input_text}\n"""',
         ]
         if input_metadata:
             prompt_lines.append(f"Consider this metadata: {input_metadata}")
@@ -96,6 +96,9 @@ class ManimCodeGenerator:
             else:
                 print("Warning: Iteration > 1 but no previous error or feedback found in state.")
 
+        prompt_lines.append("The code should visualize the following script segment:")
+        prompt_lines.append(f'"""\n{input_text}\n"""')
+
         prompt_lines.append(
             "\nGenerate ONLY the complete Python code for the scene, enclosed in ```python ... ``` markers."
         )
@@ -103,14 +106,17 @@ class ManimCodeGenerator:
 
     def generate_manim_code(self, state: GraphState) -> Dict:
         """Generates Manim Python code based on the input text and context using the LLM."""
-        print("---GENERATE MANIM CODE NODE---")
-
+        node_name = "CodeGenerator"
+        run_output_dir = Path(state["run_output_dir"])
         iteration = state["iteration"] + 1
+
+        log_run_details(
+            run_output_dir, iteration, node_name, "Node Entry", f"Starting {node_name}..."
+        )
+
         # Make copies of history lists to avoid modifying the original state directly
         error_history = state.get("error_history", [])[:]
-        evaluation_history = state.get("evaluation_history", [])[
-            :
-        ]  # Keep track even if not used directly here
+        evaluation_history = state.get("evaluation_history", [])[:]
 
         updates_to_state: Dict = {
             "iteration": iteration,
@@ -125,21 +131,28 @@ class ManimCodeGenerator:
 
         # --- Construct Prompt using helper ---
         prompt = self._build_generation_prompt(state, iteration)
+        log_run_details(run_output_dir, iteration, node_name, "LLM Prompt", prompt)
 
         # --- Call LLM using injected client ---
+        llm_output = None
         try:
             print(f"Calling Text Generation LLM: {self.llm_text_client.model}")
             response = self.llm_text_client.invoke(prompt)
             llm_output = response.content
+            log_run_details(run_output_dir, iteration, node_name, "LLM Response", llm_output)
+
         except Exception as e:
             error_message = f"Gemini API Error during code generation: {e}"
             print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir, iteration, node_name, "LLM Error", error_message, is_error=True
+            )
             updates_to_state["validation_error"] = error_message
             updates_to_state["error_history"].append(f"Iter {iteration}: {error_message}")
             return updates_to_state
 
         # --- Parse & Validate Code ---
-        print("Parsing LLM response...")
+        log_run_details(run_output_dir, iteration, node_name, "Parsing", "Parsing LLM response...")
         extracted_code = self._extract_python_code(llm_output)
 
         if not extracted_code:
@@ -147,6 +160,9 @@ class ManimCodeGenerator:
                 "Failed to parse Python code block (```python ... ```) from LLM response."
             )
             print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir, iteration, node_name, "Parsing Error", error_message, is_error=True
+            )
             updates_to_state["validation_error"] = error_message
             updates_to_state["error_history"].append(f"Iter {iteration}: {error_message}")
             return updates_to_state
@@ -158,17 +174,32 @@ class ManimCodeGenerator:
         if "from manim import" not in extracted_code:
             error_message = "Generated code missing 'from manim import ...' statement."
             print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Validation Error",
+                error_message,
+                is_error=True,
+            )
             updates_to_state["validation_error"] = error_message
             updates_to_state["error_history"].append(f"Iter {iteration}: {error_message}")
             return updates_to_state
 
         expected_class_def = f"class {agent_cfg.GENERATED_SCENE_NAME}(Scene):"
-        # Allow inheritance from subclasses of Scene as well
         if not re.search(
             rf"class\s+{agent_cfg.GENERATED_SCENE_NAME}\s*\(.*?Scene.*\):", extracted_code
         ):
             error_message = f"Generated code missing correct Scene class definition: expected '{expected_class_def}' or subclass."
             print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Validation Error",
+                error_message,
+                is_error=True,
+            )
             updates_to_state["validation_error"] = error_message
             updates_to_state["error_history"].append(f"Iter {iteration}: {error_message}")
             return updates_to_state
@@ -176,16 +207,27 @@ class ManimCodeGenerator:
         # Syntax Check using compile()
         try:
             compile(extracted_code, "<string>", "exec")
-            print("Generated code passed basic syntax check.")
+            log_run_details(
+                run_output_dir, iteration, node_name, "Syntax Check", "Passed basic syntax check."
+            )
         except SyntaxError as e:
             error_message = f"Generated code has SyntaxError: {e}"
             print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir, iteration, node_name, "Syntax Error", error_message, is_error=True
+            )
             updates_to_state["validation_error"] = error_message
             updates_to_state["error_history"].append(f"Iter {iteration}: {error_message}")
             return updates_to_state
 
         # --- Update State ---
-        print("Code generation and basic validation successful.")
-        updates_to_state["validation_error"] = None  # Explicitly clear potential previous error
+        log_run_details(
+            run_output_dir,
+            iteration,
+            node_name,
+            "Node Completion",
+            "Code generation and basic validation successful.",
+        )
+        updates_to_state["validation_error"] = None
 
         return updates_to_state

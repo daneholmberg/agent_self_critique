@@ -108,7 +108,7 @@ class TestManimScriptExecutor(unittest.TestCase):
             MockAgentConfig.MANIM_QUALITY_FLAG,
             temp_script_path,
             MockAgentConfig.GENERATED_SCENE_NAME,
-            "--output_dir",
+            "--output_file",
             ".",
         ]
         call_args, call_kwargs = mock_subprocess_run.call_args

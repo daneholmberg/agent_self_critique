@@ -10,6 +10,7 @@ load_dotenv(dotenv_path=dotenv_path)
 # --- Project Root ---
 # Calculate the project root directory (assuming this file is in agent_automator/config/)
 PROJECT_ROOT = Path(__file__).parent.parent
+BASE_DIR = PROJECT_ROOT  # Alias for consistency/use as cwd base
 
 # --- Environment Variable Names ---
 # Define constants for the *names* of the environment variables we'll look for.

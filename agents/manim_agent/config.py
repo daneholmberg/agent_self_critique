@@ -24,6 +24,7 @@ ENV_CONTEXT_FILE = "MANIM_CONTEXT_FILE"  # Path to the context file (relative to
 ENV_RUBRIC_FILE = "MANIM_RUBRIC_FILE"  # Path to the rubric file (relative to PROJECT_ROOT)
 ENV_VIDEO_EVAL_MAX_SIZE_MB = "MANIM_VIDEO_EVAL_MAX_SIZE_MB"  # Max video size in MB for evaluation
 ENV_GENERATED_SCENE_NAME = "MANIM_GENERATED_SCENE_NAME"  # Default scene name if not specified
+ENV_SAVE_GENERATED_CODE = "MANIM_SAVE_GENERATED_CODE"  # Flag to save generated code per iteration
 
 # --- Load Actual Manim Configuration Values ---
 # Load configuration values from environment variables, falling back to defaults if not set.
@@ -59,6 +60,13 @@ VIDEO_EVAL_MAX_SIZE_MB = int(os.getenv(ENV_VIDEO_EVAL_MAX_SIZE_MB, "19"))
 # The default name for the Manim Scene class to be generated if not provided in the request
 GENERATED_SCENE_NAME = os.getenv(ENV_GENERATED_SCENE_NAME, "GeneratedScene")
 
+# Flag to determine if generated code should be saved permanently per iteration
+# Defaults to False (0). Set to 1 or true in .env to enable.
+SAVE_GENERATED_CODE_DEFAULT = os.getenv(ENV_SAVE_GENERATED_CODE, "0").lower() in (
+    "true",
+    "1",
+    "t",
+)
 
 # --- Derived Paths ---
 # These paths are constructed based on the loaded configuration values.

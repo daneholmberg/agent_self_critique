@@ -1,133 +1,334 @@
 import os
+import asyncio
 import subprocess
 import uuid
+import re
+import traceback
 from typing import Dict
+from pathlib import Path
 
 from config import base_config as base_cfg
 from agents.manim_agent import config as agent_cfg
 from core.graph_state import GraphState
+from core.log_utils import log_run_details
 
 
 class ManimScriptExecutor:
     """Handles the execution of generated Manim scripts and validates output."""
 
-    def execute_manim_script(self, state: GraphState) -> Dict:
-        """Executes the generated Manim script and validates the output video."""
-        print("---EXECUTE MANIM SCRIPT NODE---")
-        updates_to_state: Dict = {}
-        # Make copies of history lists to avoid modifying the original state directly
-        error_history = state.get("error_history", [])[:]
-        # Evaluation history is not directly modified here, but passed through
-        evaluation_history = state.get("evaluation_history", [])[:]
-        iteration = state.get("iteration", "N/A")  # For logging
+    async def execute_manim_script(self, state: GraphState) -> Dict:
+        """Executes the generated Manim script asynchronously and validates the output video."""
+        node_name = "ScriptExecutor"
+        run_output_dir = Path(state["run_output_dir"])
+        iteration = state["iteration"]
+        log_run_details(
+            run_output_dir, iteration, node_name, "Node Entry", f"Starting {node_name}..."
+        )
 
-        updates_to_state["error_history"] = error_history  # Initialize with copy
-        updates_to_state["evaluation_history"] = evaluation_history  # Pass through
-        updates_to_state["validated_artifact_path"] = None  # Default to None
-        updates_to_state["validation_error"] = None  # Default to None
+        # --- Get info from state ---
+        save_generated_code_flag = state["save_generated_code"]
+        manim_code = state.get("generated_output")
+        error_history = state.get("error_history", [])[:]
+        evaluation_history = state.get("evaluation_history", [])[:]
+        # --- End state info ---
+
+        updates_to_state: Dict = {
+            "error_history": error_history,
+            "evaluation_history": evaluation_history,
+            "validated_artifact_path": None,
+            "validation_error": None,
+            "infrastructure_error": None,
+        }
 
         # 1. Check Input Code
-        manim_code = state.get("generated_output")
         if not manim_code:
             error_message = "No Manim code provided to execute."
-            print(f"ERROR: {error_message}")
+            log_run_details(
+                run_output_dir, iteration, node_name, "Input Error", error_message, is_error=True
+            )
             updates_to_state["validation_error"] = error_message
             error_history.append(f"Iter {iteration}: {error_message}")
-            # updates_to_state already contains the updated error_history
             return updates_to_state
 
-        temp_script_path = None  # Initialize to None
+        temp_script_path = None
+        saved_script_path = None
         try:
-            # 2. Prepare Script File
-            os.makedirs(agent_cfg.TEMP_SCRIPT_DIR, exist_ok=True)
+            # 2. Prepare Script File(s)
+            temp_script_dir = run_output_dir / "temp_scripts"
+            temp_script_dir.mkdir(parents=True, exist_ok=True)
             unique_id = uuid.uuid4()
-            temp_script_filename = f"manim_script_{unique_id}.py"
-            temp_script_path = os.path.join(agent_cfg.TEMP_SCRIPT_DIR, temp_script_filename)
+            temp_script_filename = f"manim_script_{iteration}_{unique_id}.py"
+            temp_script_path = temp_script_dir / temp_script_filename
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "File Setup",
+                f"Creating temporary script: {temp_script_path}",
+            )
 
-            print(f"Writing Manim script to: {temp_script_path}")
             with open(temp_script_path, "w", encoding="utf-8") as f:
                 f.write(manim_code)
 
-            # 3. Construct Manim Command
-            # Note: We run manim *from the workspace root* and tell it to output there.
+            if save_generated_code_flag:
+                saved_code_dir = run_output_dir / "saved_generated_code"
+                saved_code_dir.mkdir(parents=True, exist_ok=True)
+                saved_script_filename = f"generated_code_iter_{iteration}.py"
+                saved_script_path = saved_code_dir / saved_script_filename
+                log_run_details(
+                    run_output_dir,
+                    iteration,
+                    node_name,
+                    "File Setup",
+                    f"Saving copy of generated code to: {saved_script_path}",
+                )
+                with open(saved_script_path, "w", encoding="utf-8") as f:
+                    f.write(manim_code)
+
+            manim_output_subdir_name = "manim_media"
+            manim_output_dir_in_run = run_output_dir / manim_output_subdir_name
+            relative_manim_output_dir = manim_output_dir_in_run.relative_to(base_cfg.BASE_DIR)
+
+            expected_video_subdir = Path(agent_cfg.MANIM_VIDEO_OUTPUT_RELATIVE_PATH)
+            expected_video_filename = Path(agent_cfg.EXPECTED_VIDEO_FILENAME)
+            expected_video_path_in_run = (
+                manim_output_subdir_name / expected_video_subdir / expected_video_filename
+            )
+            expected_video_full_path = run_output_dir / expected_video_path_in_run
+
             command = [
                 "python",
                 "-m",
                 "manim",
-                agent_cfg.MANIM_QUALITY_FLAG,
-                temp_script_path,
+                str(temp_script_path.relative_to(base_cfg.BASE_DIR)),
                 agent_cfg.GENERATED_SCENE_NAME,
-                "--output_dir",
-                ".",  # Output relative to current working directory (workspace root)
+                agent_cfg.MANIM_QUALITY_FLAG,
+                "--media_dir",
+                str(relative_manim_output_dir),
+                "-v",
+                "INFO",
             ]
-            print(f"Running Manim command: {' '.join(command)}")
-
-            # 4. Execute Subprocess
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                check=False,
-                cwd=base_cfg.BASE_DIR,  # Ensure we run from the project root
+            command_str = " ".join(map(str, command))
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Command Execution",
+                f"Running Manim: {command_str}\nCWD: {base_cfg.BASE_DIR}",
             )
 
-            # 5. Check Result
-            if result.returncode != 0:
-                # Combine stdout and stderr for more context in errors
-                full_error_output = f"Stderr:\n{result.stderr}\nStdout:\n{result.stdout}"
-                error_message = f"Manim execution failed with return code {result.returncode}.\n{full_error_output}"
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=base_cfg.BASE_DIR,
+            )
+
+            stdout, stderr = await process.communicate()
+            stdout_decoded = stdout.decode().strip() if stdout else ""
+            stderr_decoded = stderr.decode().strip() if stderr else ""
+            full_process_output = f"Return Code: {process.returncode}\n--- Stdout ---\n{stdout_decoded}\n--- Stderr ---\n{stderr_decoded}"
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Command Result",
+                full_process_output,
+                is_error=(process.returncode != 0),
+            )
+
+            if process.returncode != 0:
+                full_error_output = f"Stderr:\n{stderr_decoded}\nStdout:\n{stdout_decoded}"
                 print(
-                    f"ERROR: Manim execution failed (code: {result.returncode}). Check logs/stderr."
+                    f"ERROR: Manim execution failed (code: {process.returncode}). Check run_details.log in {run_output_dir}"
                 )
-                # Store a concise error message in state, full details in history
-                updates_to_state["validation_error"] = (
-                    f"Manim execution failed with return code {result.returncode}. See history for details."
+                cmd_line_error_pattern = r"(Usage:|Error: No such option|Error: Invalid argument|Error: unrecognized arguments)"
+                is_cmd_line_error = bool(
+                    re.search(cmd_line_error_pattern, stderr_decoded, re.IGNORECASE)
                 )
-                error_history.append(f"Iter {iteration}: Manim Execution Error:\n{error_message}")
-                # validated_artifact_path remains None
+                if is_cmd_line_error:
+                    print(
+                        "Detected command-line argument error. Classifying as infrastructure error."
+                    )
+                    infrastructure_error_details = f"Manim command failed due to argument error (code {process.returncode}). Check executor code.\n{full_error_output}"
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Command Error",
+                        f"{infrastructure_error_details}\n{full_process_output}",
+                        is_error=True,
+                    )
+                    updates_to_state["infrastructure_error"] = infrastructure_error_details
+                    updates_to_state["validation_error"] = None
+                    error_history.append(
+                        f"Iter {iteration}: INFRASTRUCTURE CMD ERROR: {infrastructure_error_details}"
+                    )
+                else:
+                    print("Manim execution failed. Classifying as validation error for LLM retry.")
+                    # Extract and truncate traceback from stderr for better LLM context
+                    tb_str = stderr_decoded.strip()
+                    tb_lines = tb_str.split("\n")
+                    max_tb_lines = 20  # Increase lines slightly for more context
+                    if len(tb_lines) > max_tb_lines:
+                        # Keep the first few lines and the last few lines
+                        tb_summary = "\n".join(
+                            tb_lines[: max_tb_lines // 2]
+                            + ["... (full traceback truncated) ..."]
+                            + tb_lines[-(max_tb_lines // 2) :]
+                        )
+                    else:
+                        tb_summary = tb_str
+
+                    concise_error_for_llm = f"Manim execution failed (code {process.returncode}). Error details:\n{tb_summary}"
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Execution Error",
+                        f"{concise_error_for_llm}\n{full_process_output}",
+                        is_error=True,
+                    )
+                    updates_to_state["validation_error"] = concise_error_for_llm
+                    error_history.append(
+                        f"Iter {iteration}: Manim Execution Error:\n{error_message}"  # Keep full error in history
+                    )
             else:
                 print("Manim execution successful (return code 0).")
-                # Construct expected path relative to the workspace root
-                expected_relative_path = os.path.join(
-                    agent_cfg.MANIM_VIDEO_OUTPUT_RELATIVE_PATH, agent_cfg.EXPECTED_VIDEO_FILENAME
+                log_run_details(
+                    run_output_dir,
+                    iteration,
+                    node_name,
+                    "Artifact Check",
+                    f"Checking for video artifact at: {expected_video_full_path}",
                 )
-                expected_full_path = os.path.join(base_cfg.BASE_DIR, expected_relative_path)
-
-                print(f"Checking for video artifact at: {expected_full_path}")
-                if os.path.exists(expected_full_path):
-                    print("Video artifact found.")
-                    updates_to_state["validated_artifact_path"] = (
-                        expected_relative_path  # Store relative path
+                if expected_video_full_path.exists():
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Artifact Found",
+                        f"Video artifact found: {expected_video_path_in_run}",
                     )
-                    updates_to_state["validation_error"] = None  # Clear validation error
+                    print(
+                        f"Video artifact found at {expected_video_full_path}. Path stored relative to run dir: {expected_video_path_in_run}"
+                    )
+                    updates_to_state["validated_artifact_path"] = str(expected_video_path_in_run)
+                    updates_to_state["validation_error"] = None
                 else:
-                    error_message = f"Manim reported success, but expected video not found at: {expected_full_path}"
+                    error_message = f"Manim reported success, but expected video not found at: {expected_video_full_path}\nStdout:\n{stdout_decoded}\nStderr:\n{stderr_decoded}"
                     print(f"ERROR: {error_message}")
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Missing Artifact Error",
+                        error_message,
+                        is_error=True,
+                    )
                     updates_to_state["validation_error"] = error_message
-                    error_history.append(f"Iter {iteration}: {error_message}")
-                    # validated_artifact_path remains None
+                    error_history.append(f"Iter {iteration}: Missing Video Error: {error_message}")
 
         except FileNotFoundError as e:
-            # This likely means the temp script directory couldn't be created or written to
-            error_message = f"Error writing temporary script: {e}"
-            print(f"ERROR: {error_message}")
-            updates_to_state["validation_error"] = error_message
-            error_history.append(f"Iter {iteration}: File Error: {error_message}")
-            # validated_artifact_path remains None
-        except Exception as e:  # Catch other potential errors during execution
+            error_message = f"Error related to file/directory setup: {e}"
+            print(
+                f"ERROR: Infrastructure file/directory setup error: {e}. Check run_details.log in {run_output_dir}"
+            )
+            tb_str = traceback.format_exc()
+            # Limit traceback length for clarity
+            tb_lines = tb_str.strip().split("\n")
+            max_tb_lines = 15
+            if len(tb_lines) > max_tb_lines:
+                tb_summary = "\n".join(
+                    tb_lines[-(max_tb_lines // 2) :]
+                    + ["... (truncated) ..."]
+                    + tb_lines[-(max_tb_lines // 2) :]
+                )
+            else:
+                tb_summary = tb_str
+
+            infrastructure_error_details = (
+                f"{error_message}\nTraceback (most recent call last):\n{tb_summary}"
+            )
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "File System Error",
+                infrastructure_error_details,
+                is_error=True,
+            )
+            updates_to_state["infrastructure_error"] = infrastructure_error_details
+            updates_to_state["validation_error"] = None
+            error_history.append(
+                f"Iter {iteration}: INFRASTRUCTURE FILE ERROR: {infrastructure_error_details}"
+            )
+
+        except Exception as e:
             error_message = f"An unexpected error occurred during Manim script execution: {e}"
-            print(f"ERROR: {error_message}")
-            updates_to_state["validation_error"] = error_message
-            error_history.append(f"Iter {iteration}: Unexpected Execution Error: {error_message}")
-            # validated_artifact_path remains None
+            print(
+                f"ERROR: Unexpected infrastructure error during script execution: {e}. Check run_details.log in {run_output_dir}"
+            )
+            tb_str = traceback.format_exc()
+            # Limit traceback length for clarity
+            tb_lines = tb_str.strip().split("\n")
+            max_tb_lines = 15
+            if len(tb_lines) > max_tb_lines:
+                tb_summary = "\n".join(
+                    tb_lines[-(max_tb_lines // 2) :]
+                    + ["... (truncated) ..."]
+                    + tb_lines[-(max_tb_lines // 2) :]
+                )
+            else:
+                tb_summary = tb_str
+
+            infrastructure_error_details = (
+                f"{error_message}\nTraceback (most recent call last):\n{tb_summary}"
+            )
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Unexpected Error",
+                infrastructure_error_details,
+                is_error=True,
+            )
+            updates_to_state["infrastructure_error"] = infrastructure_error_details
+            updates_to_state["validation_error"] = None
+            error_history.append(
+                f"Iter {iteration}: INFRASTRUCTURE ERROR: {infrastructure_error_details}"
+            )
+
         finally:
-            # 6. Cleanup Temp Script (Optional but recommended)
-            if temp_script_path and os.path.exists(temp_script_path):
+            if temp_script_path and temp_script_path.exists():
                 try:
                     os.remove(temp_script_path)
-                    print(f"Cleaned up temporary script: {temp_script_path}")
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Cleanup",
+                        f"Deleted temporary script: {temp_script_path}",
+                    )
                 except OSError as e:
-                    print(f"Warning: Could not delete temporary script {temp_script_path}: {e}")
+                    cleanup_error_msg = (
+                        f"Warning: Could not delete temporary script {temp_script_path}: {e}"
+                    )
+                    log_run_details(
+                        run_output_dir,
+                        iteration,
+                        node_name,
+                        "Cleanup Error",
+                        cleanup_error_msg,
+                        is_error=True,
+                    )
+                    print(cleanup_error_msg)
 
-        # 7. Return updated state fields
+        log_run_details(
+            run_output_dir,
+            iteration,
+            node_name,
+            "Node Completion",
+            f"Finished {node_name}. Updates: { {k:v for k,v in updates_to_state.items() if k not in ['error_history', 'evaluation_history']} }",
+        )
         return updates_to_state

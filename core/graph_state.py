@@ -22,6 +22,11 @@ class GraphState(TypedDict):
         evaluation_history: Accumulated evaluation feedback across iterations.
         final_output_path: Path where the final primary output (code/text) is saved.
         final_artifact_path: Path where the final artifact (e.g., video) is saved.
+        infrastructure_error: An error that occurred in the agent's supporting code, not the generated output.
+
+        # New fields for run-specific outputs and debug flags
+        run_output_dir: str # Absolute path to the base directory for *this* run's outputs
+        save_generated_code: bool # Flag indicating whether to save generated code permanently
     """
 
     input_text: str
@@ -39,3 +44,8 @@ class GraphState(TypedDict):
     evaluation_history: List[str]
     final_output_path: Optional[str]
     final_artifact_path: Optional[str]
+    infrastructure_error: Optional[str]
+
+    # New fields
+    run_output_dir: str
+    save_generated_code: bool

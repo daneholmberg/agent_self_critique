@@ -101,7 +101,7 @@ The goal is to significantly speed up the Manim animation workflow for content c
 
 2.  **Core Settings (`config.py`):**
     *   Review the `config.py` file. Most settings have sensible defaults, but you may need to adjust:
-        *   `MANIM_VIDEO_OUTPUT_DIR`: **Crucial.** This path (relative to the project root) is where the script *expects* Manim to place its output video files. This often requires adjustment based on your specific Manim version/setup and how it behaves when called via `subprocess` with `--output_dir .`. Test by running a simple Manim scene manually first if needed.
+        *   `MANIM_VIDEO_OUTPUT_DIR`: **Crucial.** This path (relative to the project root) is where the script *expects* Manim to place its output video files. This often requires adjustment based on your specific Manim version/setup and how it behaves when called via `subprocess` with `--output_file .`. Test by running a simple Manim scene manually first if needed.
         *   `EXPECTED_VIDEO_FILENAME`: The standard filename Manim generates (defaults to `GeneratedScene.mp4`).
         *   `GEMINI_MODEL_NAME`: Ensure this model supports both text generation and video input (e.g., `gemini-1.5-pro-latest`). Check Google's documentation.
         *   `MAX_ITERATIONS`: Controls how many times the agent will try before giving up.

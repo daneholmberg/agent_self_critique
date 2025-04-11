@@ -8,14 +8,22 @@ from core.graph_state import GraphState
 def decide_after_validation(state: GraphState) -> str:
     """
     Conditional edge determining the next step after code validation.
+    First checks for infrastructure errors, then validation errors.
 
     Args:
         state: The current graph state.
 
     Returns:
-        The name of the next node ('generate_output' or 'evaluate_output') or END
-        if the maximum iteration limit is reached due to validation errors.
+        The name of the next node ('generate_output' or 'evaluate_output') or END.
     """
+    # Prioritize checking for infrastructure errors
+    if state.get("infrastructure_error"):
+        print(
+            f"Infrastructure error detected. Ending graph. Error:\n{state['infrastructure_error']}"
+        )
+        return END
+
+    # Proceed with validation error check if no infrastructure error
     if state["validation_error"]:
         if state["iteration"] >= state["max_iterations"]:
             print("Maximum validation iterations reached. Ending graph.")
