@@ -29,7 +29,9 @@ ENV_SAVE_GENERATED_CODE = "MANIM_SAVE_GENERATED_CODE"  # Flag to save generated 
 # NEW: Video Evaluation Frame Extraction Config
 ENV_VIDEO_EVAL_FPS = "MANIM_VIDEO_EVAL_FPS"  # Frames per second to extract for evaluation
 ENV_VIDEO_EVAL_MAX_FRAMES = "MANIM_VIDEO_EVAL_MAX_FRAMES"  # Max frames to send for evaluation
-
+ENV_MANIM_EXECUTION_TIMEOUT_SECONDS = (
+    "MANIM_EXECUTION_TIMEOUT_SECONDS"  # Timeout for Manim execution
+)
 # --- Load Actual Manim Configuration Values ---
 # Load configuration values from environment variables, falling back to defaults if not set.
 
@@ -74,6 +76,8 @@ SAVE_GENERATED_CODE_DEFAULT = os.getenv(ENV_SAVE_GENERATED_CODE, "0").lower() in
     "1",
     "t",
 )
+
+MANIM_EXECUTION_TIMEOUT_SECONDS = int(os.getenv(ENV_MANIM_EXECUTION_TIMEOUT_SECONDS, "120"))
 
 # --- Derived Paths ---
 # These paths are constructed based on the loaded configuration values.

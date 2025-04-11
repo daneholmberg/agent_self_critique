@@ -37,7 +37,7 @@ A specific enhancement has been requested for the Manim code/video being generat
 {enhancement_request}
 --- END ENHANCEMENT REQUEST ---
 
-Please add a new criterion to the rubric *specifically* related to fulfilling this enhancement request. This new criterion should be phrased clearly and concisely. It must require a score of 4 (Good) or 5 (Excellent) on the standard 1-5 scale for the enhancement to be considered successfully implemented.
+Please add one OR MORE new criterion to the rubric *specifically* related to fulfilling this enhancement request. This new criterion should be phrased clearly, you are allowed to be a little bit more verbose than the other sections to the rubric to make sure there's enough details that the grader can easily understand the new criterion. It must require a score of 4 (Good) or 5 (Excellent) on the standard 1-5 scale for the enhancement to be considered successfully implemented.
 
 Output ONLY the *complete*, updated rubric including the original criteria and the new enhancement criterion. Do not add any introductory text, explanations, or markdown formatting around the rubric itself.
 """

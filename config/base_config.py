@@ -29,7 +29,7 @@ ENV_BASE_OUTPUT_DIR = "BASE_OUTPUT_DIR"  # Base directory for all task outputs
 GEMINI_API_KEY_NAME = os.getenv(ENV_GEMINI_API_KEY_NAME, "GOOGLE_API_KEY")
 
 # Default Gemini model to use if a task doesn't specify one.
-GEMINI_DEFAULT_MODEL_NAME = os.getenv(ENV_GEMINI_DEFAULT_MODEL_NAME, "gemini-2.5-pro-exp-03-25")
+GEMINI_DEFAULT_MODEL_NAME = os.getenv(ENV_GEMINI_DEFAULT_MODEL_NAME, "gemini-2.5-pro-preview-03-25")
 
 # Default maximum number of iterations for the generation/evaluation loop.
 MAX_ITERATIONS = int(os.getenv(ENV_MAX_ITERATIONS, "5"))  # Ensure it's an integer

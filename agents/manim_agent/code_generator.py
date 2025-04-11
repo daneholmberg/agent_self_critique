@@ -1,5 +1,5 @@
 import re
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from pathlib import Path
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -69,30 +69,50 @@ class ManimCodeGenerator:
         self.llm_text_client = llm_text_client
 
     @staticmethod
-    def _extract_python_code(text: str) -> Optional[str]:
-        """Extracts Python code block from a string (handles ```python ... ```)."""
+    def _extract_code_and_thoughts(text: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extracts Python code block (```python ... ```) and thoughts block
+        (```thoughts ... ```) from a string.
+        """
         # Regex to find code blocks fenced by ```python and ```
-        match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        # Fallback: Maybe the LLM just returned code without fences
-        # Basic check: does it look like Python code? (imports, class def)
-        if "import" in text and ("class" in text or "def" in text):
-            # Be cautious with this fallback, might grab non-code text
-            # If the LLM is explicitly prompted for *only* code, this might be okay.
-            return text.strip()
-        return None
+        code_match = re.search(r"```python\n(.*?)```", text, re.DOTALL)
+        extracted_code = code_match.group(1).strip() if code_match else None
+
+        # Regex to find thoughts blocks fenced by ```thoughts and ```
+        thoughts_match = re.search(r"```thoughts\n(.*?)```", text, re.DOTALL)
+        extracted_thoughts = thoughts_match.group(1).strip() if thoughts_match else None
+
+        # Fallback for code: Maybe the LLM just returned code without fences
+        if not extracted_code and "import" in text and ("class" in text or "def" in text):
+            # Try to extract based on known start/end patterns if thoughts exist
+            if extracted_thoughts:
+                # If thoughts were found, assume code is before or after it
+                thoughts_block = thoughts_match.group(0)  # Get the full ```thoughts...``` block
+                code_candidate = text.replace(thoughts_block, "").strip()
+                # Basic check: does it look like Python code?
+                if "import" in code_candidate and (
+                    "class" in code_candidate or "def" in code_candidate
+                ):
+                    extracted_code = code_candidate
+            else:
+                # If no thoughts, assume the whole text might be code (use with caution)
+                extracted_code = text.strip()
+
+        return extracted_code, extracted_thoughts
 
     def _build_generation_prompt(self, state: GraphState, iteration: int) -> str:
         """
         Constructs the prompt for the Manim code generation LLM call.
 
         Expects 'input_text', 'context_doc', 'general_context', 'final_command',
-        'previous_code_attempt' (optional), and 'enhancement_request' (optional)
-        in the GraphState. Uses defaults from agent_cfg for general_context/final_command.
+        'previous_code_attempt' (optional), 'enhancement_request' (optional),
+        and 'thought_history' (optional) in the GraphState.
+        Uses defaults from agent_cfg for general_context/final_command.
         """
         input_text = state["input_text"]  # Segment to animate
         context_doc = state["context_doc"]  # Manim Documentation
+        thought_history = state.get("thought_history", [])  # Get thought history
+
         # Check if this is the *start* of an enhancement request
         is_initial_enhancement = state.get("previous_code_attempt") and state.get(
             "enhancement_request"
@@ -124,6 +144,14 @@ class ManimCodeGenerator:
                     "--- End General Context ---\n",  # Added newline for spacing
                 ]
             )
+
+        # --- Add Thought History --- (If it exists)
+        if thought_history:
+            prompt_lines.append("\n--- History of Previous Thoughts & Outcomes ---")
+            for i, thought_entry in enumerate(thought_history):
+                # Add the full thought entry, which already includes iteration and outcome
+                prompt_lines.append(thought_entry)
+            prompt_lines.append("--- End History of Previous Thoughts & Outcomes ---\n")
 
         # --- Previous Code & Enhancement / Failure Feedback ---
         previous_failed_code = state.get("generated_output")  # Last generated code, may have failed
@@ -161,22 +189,134 @@ class ManimCodeGenerator:
 
         # --- End Previous Code ---
 
-        # Segment to Animate (Only include if *not* enhancing existing code)
-        # An enhancement request implies the context is the previous code + request
-        if not enhancement_request:
-            prompt_lines.append("\n--- Segment to Animate ---")
-            prompt_lines.append(f'"""\n{input_text}\n"""')
-            prompt_lines.append("--- End Segment to Animate ---")
+        prompt_lines.append("\n--- Segment to Animate ---")
+        prompt_lines.append(f'"""\n{input_text}\n"""')
+        prompt_lines.append("--- End Segment to Animate ---")
 
-        # Final Command from user (or default) - always include
-        prompt_lines.append(f"\n--- Task ---")
-        prompt_lines.append(final_command.strip())  # Use strip() for tidiness
+        # --- Determine Final Task Instruction ---
+        task_content = None
+        # Attempt refinement only on retries (iteration > 1 originally, now checks current_iteration_number)
+        if iteration > 1 and (state.get("validation_error") or state.get("evaluation_feedback")):
+            # Call the helper to get the refined task
+            task_content = self._generate_refined_task(state, iteration)  # Pass current iter num
+
+        # Fallback to original command if refinement wasn't attempted (iter 1) or if it failed (returned None)
+        if not task_content:
+            # Always fall back to the original final command (or its default).
+            # The prompt structure already presents enhancement details separately if applicable.
+            task_content = final_command  # Use the final_command retrieved earlier
+
+        # --- Append Final Task ---
+        prompt_lines.append(f"\\n--- Task ---")
+        prompt_lines.append(task_content.strip())  # Use the determined task content
         prompt_lines.append("--- End Task ---")
 
         prompt_lines.append(
             "\nGenerate ONLY the complete Python code for the scene, enclosed in ```python ... ``` markers."
+            " Additionally, provide your thought process, reflections on previous attempts (if any), and plan for this generation attempt in a separate ```thoughts ... ``` block. (note this is different from your internal thinking before the answer)"
         )
         return "\n".join(prompt_lines)
+
+    def _generate_refined_task(self, state: GraphState, iteration: int) -> Optional[str]:
+        """
+        Uses the LLM to generate a refined, specific task instruction based on
+        previous errors or feedback.
+
+        Args:
+            state: The current graph state containing feedback.
+            iteration: The current iteration number (1-based).
+
+        Returns:
+            The refined task string, or None if no feedback exists or an error occurs.
+        """
+        validation_error = state.get("validation_error")
+        evaluation_feedback = state.get("evaluation_feedback")
+        run_output_dir = Path(state["run_output_dir"])
+        node_name = "CodeGenerator_TaskRefiner"  # Distinguish logging
+
+        # Only refine if there's feedback from a previous attempt (i.e., iteration > 1)
+        # The check `iteration > 1` is handled by the caller (_build_generation_prompt)
+        if not (validation_error or evaluation_feedback):
+            # This case should ideally not be reached if called correctly, but safety first.
+            print("Warning: _generate_refined_task called without feedback.")
+            return None
+
+        # Determine the original request context AND enhancement separately
+        # The initial_goal is always based on the final_command (default or user-provided)
+        initial_goal = state.get("final_command", agent_cfg.DEFAULT_GENERATOR_FINAL_COMMAND)
+        enhancement_request = state.get("enhancement_request")  # Will be None if not enhancing
+
+        summarizer_prompt = f"""
+You are an expert prompt engineer assisting in a multi-turn AI workflow. Your goal is to refine the final 'Task' instruction for a Manim code generation AI based on the outcome of its previous attempt, considering the initial goal and any requested enhancements.
+
+This refined 'Task' instruction will be placed at the *very end* of the main prompt given to the code generation AI. It's crucial that this instruction is clear, actionable, and leverages the context the code generation AI has already received.
+
+**Context Provided to Code Generation AI (Before the Task You Generate):**
+1. Manim programming rules and best practices (MANIM_RULES).
+2. Relevant Manim documentation excerpts (`context_doc`).
+3. General context about the overall video/animation goal (`general_context`).
+4. (If applicable) The previous code attempt that failed or is being enhanced (`previous_code_attempt` or `generated_output` from the failed run).
+5. (If applicable) Specific feedback detailing the validation error (`validation_error`).
+6. (If applicable) Specific feedback detailing evaluation results based on a rubric (`evaluation_feedback`).
+7. (If applicable) The specific text detailing the enhancement request.
+
+**Your Input:**
+- Initial Goal: "{initial_goal}"
+- Enhancement Request (if applicable): "{enhancement_request or 'None'}"
+- Validation Error (from previous attempt, if any): "{validation_error or 'None'}"
+- Evaluation Feedback (from previous attempt, if any): "{evaluation_feedback or 'None'}"
+
+**Your Task:**
+Generate ONLY the text content for the final 'Task' instruction. Apply strong prompt engineering principles:
+- Synthesize the 'Initial Goal' and the 'Enhancement Request' (if provided) to understand the *current* desired outcome.
+- Be specific about the *fixes* needed, directly referencing the key issues from the validation error and/or evaluation feedback.
+- Clearly reiterate the core objective (incorporating the enhancement if applicable).
+- Ensure the instruction is concise and guides the code generation AI effectively on its *next* attempt to achieve the desired outcome while fixing the errors.
+- Do **not** include the `--- Task ---` or `--- End Task ---` markers in your output. Just provide the instruction text itself.
+"""
+
+        log_run_details(
+            run_output_dir, iteration, node_name, "Summarizer LLM Prompt", summarizer_prompt
+        )
+
+        try:
+            print(f"Calling Task Summarizer LLM: {self.llm_text_client.model}")
+            response = self.llm_text_client.invoke(summarizer_prompt)
+            refined_task = response.content.strip()
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Summarizer LLM Response (Refined Task)",
+                refined_task,
+            )
+            # Basic check: Ensure response isn't empty or just whitespace
+            if refined_task:
+                return refined_task
+            else:
+                print("WARNING: Task Summarizer LLM returned empty content. Falling back.")
+                log_run_details(
+                    run_output_dir,
+                    iteration,
+                    node_name,
+                    "Summarizer LLM Warning",
+                    "LLM returned empty content.",
+                    is_error=True,
+                )
+                return None  # Fallback signal
+
+        except Exception as e:
+            error_message = f"Error calling Task Summarizer LLM: {e}"
+            print(f"WARNING: {error_message}")
+            log_run_details(
+                run_output_dir,
+                iteration,
+                node_name,
+                "Summarizer LLM Error",
+                error_message,
+                is_error=True,
+            )
+            return None  # Fallback signal
 
     def _handle_generation_error_and_update_state(
         self,
@@ -262,6 +402,7 @@ class ManimCodeGenerator:
         # Make copies of history lists to avoid modifying the original state directly
         error_history = state.get("error_history", [])[:]
         evaluation_history = state.get("evaluation_history", [])[:]
+        thought_history = state.get("thought_history", [])[:]  # Initialize thought history
 
         # Determine if this is the first iteration of an enhancement request
         is_initial_enhancement = state.get("previous_code_attempt") and state.get(
@@ -278,6 +419,7 @@ class ManimCodeGenerator:
             "evaluation_passed": None,  # Reset previous evaluation status
             "error_history": error_history,  # Pass copies
             "evaluation_history": evaluation_history,  # Pass copies
+            "thought_history": thought_history,  # Pass copy to modify
             # --- State Persistence ---
             # Keep enhancement request persistent across retries within the enhancement task
             "enhancement_request": persistent_enhancement_request,
@@ -333,18 +475,35 @@ class ManimCodeGenerator:
                 log_event_name="LLM Error",
                 error_state_key="validation_error",  # LLM errors treated as validation errors for retry loop
             )
+            # Append error marker to thoughts history even on LLM error
+            updates_to_state["thought_history"].append(
+                f"Iteration {current_iteration_number}: LLM Error - {error_message}"
+            )
             return updates_to_state
 
-        # --- Parse & Validate Code ---
+        # --- Parse Code and Thoughts ---
         log_run_details(
             run_output_dir,
             current_iteration_number,
             node_name,
             "Parsing",
-            "Parsing LLM response...",
+            "Parsing LLM response for code and thoughts...",
         )
-        extracted_code = self._extract_python_code(llm_output)
+        extracted_code, extracted_thoughts = self._extract_code_and_thoughts(llm_output)
 
+        # --- Update Thought History ---
+        # Log thoughts whether they exist or not, and regardless of code validity
+        thought_log_entry = f"Iteration {current_iteration_number}: {extracted_thoughts or 'No thoughts block found.'}"
+        updates_to_state["thought_history"].append(thought_log_entry)
+        log_run_details(
+            run_output_dir,
+            current_iteration_number,
+            node_name,
+            "Extracted Thoughts",
+            thought_log_entry,
+        )
+
+        # --- Validate Code ---
         if not extracted_code:
             error_message = (
                 "Failed to parse Python code block (```python ... ```) from LLM response."
@@ -358,6 +517,7 @@ class ManimCodeGenerator:
                 run_output_dir=run_output_dir,
                 log_event_name="Parsing Error",
             )
+            # Note: thought_history already updated above
             return updates_to_state
 
         # Set the generated code in the state *before* validation checks
@@ -375,6 +535,10 @@ class ManimCodeGenerator:
                 run_output_dir=run_output_dir,
                 log_event_name="Validation Error",
             )
+            # Append validation failure info to the thought added earlier
+            updates_to_state["thought_history"][
+                -1
+            ] += f" (Result: Failed Validation - {error_message})"
             return updates_to_state
 
         expected_class_def = f"class {agent_cfg.GENERATED_SCENE_NAME}(Scene):"
@@ -392,6 +556,10 @@ class ManimCodeGenerator:
                 run_output_dir=run_output_dir,
                 log_event_name="Validation Error",
             )
+            # Append validation failure info to the thought added earlier
+            updates_to_state["thought_history"][
+                -1
+            ] += f" (Result: Failed Validation - {error_message})"
             return updates_to_state
 
         # Syntax Check using compile()
@@ -415,6 +583,10 @@ class ManimCodeGenerator:
                 run_output_dir=run_output_dir,
                 log_event_name="Syntax Error",
             )
+            # Append syntax error info to the thought added earlier
+            updates_to_state["thought_history"][
+                -1
+            ] += f" (Result: Failed Syntax Check - {error_message})"
             return updates_to_state
 
         # --- Update State ---
@@ -425,6 +597,8 @@ class ManimCodeGenerator:
             "Node Completion",
             "Code generation and basic validation successful.",
         )
+        # Append success marker to the thought added earlier
+        updates_to_state["thought_history"][-1] += " (Result: Passed Basic Validation)"
         updates_to_state["validation_error"] = None  # Clear validation error on success
 
         return updates_to_state

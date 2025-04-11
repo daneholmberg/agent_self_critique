@@ -143,110 +143,185 @@ class ManimScriptExecutor:
                 cwd=base_cfg.BASE_DIR,
             )
 
-            stdout, stderr = await process.communicate()
-            stdout_decoded = stdout.decode().strip() if stdout else ""
-            stderr_decoded = stderr.decode().strip() if stderr else ""
-            full_process_output = f"Return Code: {process.returncode}\n--- Stdout ---\n{stdout_decoded}\n--- Stderr ---\n{stderr_decoded}"
+            # --- MODIFICATION: Add Timeout ---
+            stdout_decoded = ""
+            stderr_decoded = ""
+            return_code = -1  # Default to indicate potential timeout or other issue
+            timeout_occurred = False
+
+            try:
+                # Wait for the process to complete with a timeout
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=agent_cfg.MANIM_EXECUTION_TIMEOUT_SECONDS
+                )
+                stdout_decoded = stdout.decode().strip() if stdout else ""
+                stderr_decoded = stderr.decode().strip() if stderr else ""
+                return_code = process.returncode
+
+            except asyncio.TimeoutError:
+                timeout_occurred = True
+                error_message = f"Manim execution timed out after {agent_cfg.MANIM_EXECUTION_TIMEOUT_SECONDS} seconds. Process terminated."
+                print(f"ERROR: {error_message}")
+                log_run_details(
+                    run_output_dir,
+                    iteration,
+                    node_name,
+                    "Timeout Error",
+                    error_message,
+                    is_error=True,
+                )
+                # Attempt to kill the process
+                try:
+                    process.kill()
+                    await process.wait()  # Ensure it's actually killed
+                    print("Manim process killed due to timeout.")
+                except ProcessLookupError:
+                    print("Manim process already terminated before kill attempt.")
+                except Exception as kill_err:
+                    print(f"Error trying to kill timed-out Manim process: {kill_err}")
+
+                # Treat timeout as a validation error for retry purposes
+                updates_to_state["validation_error"] = error_message
+                error_history.append(f"Iter {iteration}: Manim Timeout Error: {error_message}")
+                # No artifact expected on timeout
+                updates_to_state["validated_artifact_path"] = None
+
+            except Exception as comm_err:
+                # Handle other potential errors during communicate()
+                error_message = f"Error during Manim process communication: {comm_err}"
+                print(f"ERROR: {error_message}")
+                log_run_details(
+                    run_output_dir,
+                    iteration,
+                    node_name,
+                    "Communication Error",
+                    error_message,
+                    is_error=True,
+                )
+                updates_to_state["validation_error"] = error_message  # Treat as validation error
+                error_history.append(f"Iter {iteration}: Manim Comm Error: {error_message}")
+                # Attempt to ensure process is cleaned up if possible
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except Exception:
+                        pass  # Ignore errors during cleanup after communication failure
+
+            # --- End MODIFICATION ---
+
+            # Log the final result (even after timeout/error, log what we got)
+            full_process_output = f"Return Code: {return_code}\\n--- Stdout ---\\n{stdout_decoded}\\n--- Stderr ---\\n{stderr_decoded}"
             log_run_details(
                 run_output_dir,
                 iteration,
                 node_name,
                 "Command Result",
                 full_process_output,
-                is_error=(process.returncode != 0),
+                is_error=(return_code != 0),  # Use the captured return code
             )
 
-            if process.returncode != 0:
-                full_error_output = f"Stderr:\n{stderr_decoded}\nStdout:\n{stdout_decoded}"
-                print(
-                    f"ERROR: Manim execution failed (code: {process.returncode}). Check run_details.log in {run_output_dir}"
-                )
-                cmd_line_error_pattern = r"(Usage:|Error: No such option|Error: Invalid argument|Error: unrecognized arguments)"
-                is_cmd_line_error = bool(
-                    re.search(cmd_line_error_pattern, stderr_decoded, re.IGNORECASE)
-                )
-                if is_cmd_line_error:
+            # Only proceed with regular error/success check if no timeout occurred
+            if not timeout_occurred and return_code is not None and return_code != -1:
+                # --- Start INDENT ---
+                if return_code != 0:
+                    full_error_output = f"Stderr:\\n{stderr_decoded}\\nStdout:\\n{stdout_decoded}"
                     print(
-                        "Detected command-line argument error. Classifying as infrastructure error."
+                        f"ERROR: Manim execution failed (code: {return_code}). Check run_details.log in {run_output_dir}"
                     )
-                    infrastructure_error_details = f"Manim command failed due to argument error (code {process.returncode}). Check executor code.\n{full_error_output}"
-                    log_run_details(
-                        run_output_dir,
-                        iteration,
-                        node_name,
-                        "Command Error",
-                        f"{infrastructure_error_details}\n{full_process_output}",
-                        is_error=True,
+                    cmd_line_error_pattern = r"(Usage:|Error: No such option|Error: Invalid argument|Error: unrecognized arguments)"
+                    is_cmd_line_error = bool(
+                        re.search(cmd_line_error_pattern, stderr_decoded, re.IGNORECASE)
                     )
-                    updates_to_state["infrastructure_error"] = infrastructure_error_details
-                    updates_to_state["validation_error"] = None
-                    error_history.append(
-                        f"Iter {iteration}: INFRASTRUCTURE CMD ERROR: {infrastructure_error_details}"
-                    )
-                else:
-                    print("Manim execution failed. Classifying as validation error for LLM retry.")
-                    # Extract and truncate traceback from stderr for better LLM context
-                    tb_str = stderr_decoded.strip()
-                    tb_lines = tb_str.split("\n")
-                    max_tb_lines = 20  # Increase lines slightly for more context
-                    if len(tb_lines) > max_tb_lines:
-                        # Keep the first few lines and the last few lines
-                        tb_summary = "\n".join(
-                            tb_lines[: max_tb_lines // 2]
-                            + ["... (full traceback truncated) ..."]
-                            + tb_lines[-(max_tb_lines // 2) :]
+                    if is_cmd_line_error:
+                        print(
+                            "Detected command-line argument error. Classifying as infrastructure error."
+                        )
+                        infrastructure_error_details = f"Manim command failed due to argument error (code {return_code}). Check executor code.\\n{full_error_output}"
+                        log_run_details(
+                            run_output_dir,
+                            iteration,
+                            node_name,
+                            "Command Error",
+                            f"{infrastructure_error_details}\\n{full_process_output}",
+                            is_error=True,
+                        )
+                        updates_to_state["infrastructure_error"] = infrastructure_error_details
+                        updates_to_state["validation_error"] = None
+                        error_history.append(
+                            f"Iter {iteration}: INFRASTRUCTURE CMD ERROR: {infrastructure_error_details}"
                         )
                     else:
-                        tb_summary = tb_str
+                        print(
+                            "Manim execution failed. Classifying as validation error for LLM retry."
+                        )
+                        # Extract and truncate traceback from stderr for better LLM context
+                        tb_str = stderr_decoded.strip()
+                        tb_lines = tb_str.split("\\n")
+                        max_tb_lines = 20  # Increase lines slightly for more context
+                        if len(tb_lines) > max_tb_lines:
+                            # Keep the first few lines and the last few lines
+                            tb_summary = "\\n".join(
+                                tb_lines[: max_tb_lines // 2]
+                                + ["... (full traceback truncated) ..."]
+                                + tb_lines[-(max_tb_lines // 2) :]
+                            )
+                        else:
+                            tb_summary = tb_str
 
-                    concise_error_for_llm = f"Manim execution failed (code {process.returncode}). Error details:\n{tb_summary}"
-                    log_run_details(
-                        run_output_dir,
-                        iteration,
-                        node_name,
-                        "Execution Error",
-                        f"{concise_error_for_llm}\n{full_process_output}",
-                        is_error=True,
-                    )
-                    updates_to_state["validation_error"] = concise_error_for_llm
-                    error_history.append(
-                        f"Iter {iteration}: Manim Execution Error:\n{concise_error_for_llm}"  # Keep concise error in history
-                    )
-            else:
-                print("Manim execution successful (return code 0).")
-                log_run_details(
-                    run_output_dir,
-                    iteration,
-                    node_name,
-                    "Artifact Check",
-                    f"Checking for video artifact at: {expected_video_full_path}",
-                )
-                if expected_video_full_path.exists():
-                    log_run_details(
-                        run_output_dir,
-                        iteration,
-                        node_name,
-                        "Artifact Found",
-                        f"Video artifact found: {expected_video_path_in_run}",
-                    )
-                    print(
-                        f"Video artifact found at {expected_video_full_path}. Path stored relative to run dir: {expected_video_path_in_run}"
-                    )
-                    updates_to_state["validated_artifact_path"] = str(expected_video_path_in_run)
-                    updates_to_state["validation_error"] = None
+                        concise_error_for_llm = f"Manim execution failed (code {return_code}). Error details:\\n{tb_summary}"
+                        log_run_details(
+                            run_output_dir,
+                            iteration,
+                            node_name,
+                            "Execution Error",
+                            f"{concise_error_for_llm}\\n{full_process_output}",
+                            is_error=True,
+                        )
+                        updates_to_state["validation_error"] = concise_error_for_llm
+                        error_history.append(
+                            f"Iter {iteration}: Manim Execution Error:\\n{concise_error_for_llm}"  # Keep concise error in history
+                        )
                 else:
-                    error_message = f"Manim reported success, but expected video not found at: {expected_video_full_path}\nStdout:\n{stdout_decoded}\nStderr:\n{stderr_decoded}"
-                    print(f"ERROR: {error_message}")
+                    print("Manim execution successful (return code 0).")
                     log_run_details(
                         run_output_dir,
                         iteration,
                         node_name,
-                        "Missing Artifact Error",
-                        error_message,
-                        is_error=True,
+                        "Artifact Check",
+                        f"Checking for video artifact at: {expected_video_full_path}",
                     )
-                    updates_to_state["validation_error"] = error_message
-                    error_history.append(f"Iter {iteration}: Missing Video Error: {error_message}")
+                    if expected_video_full_path.exists():
+                        log_run_details(
+                            run_output_dir,
+                            iteration,
+                            node_name,
+                            "Artifact Found",
+                            f"Video artifact found: {expected_video_path_in_run}",
+                        )
+                        print(
+                            f"Video artifact found at {expected_video_full_path}. Path stored relative to run dir: {expected_video_path_in_run}"
+                        )
+                        updates_to_state["validated_artifact_path"] = str(
+                            expected_video_path_in_run
+                        )
+                        updates_to_state["validation_error"] = None
+                    else:
+                        error_message = f"Manim reported success, but expected video not found at: {expected_video_full_path}\\nStdout:\\n{stdout_decoded}\\nStderr:\\n{stderr_decoded}"
+                        print(f"ERROR: {error_message}")
+                        log_run_details(
+                            run_output_dir,
+                            iteration,
+                            node_name,
+                            "Missing Artifact Error",
+                            error_message,
+                            is_error=True,
+                        )
+                        updates_to_state["validation_error"] = error_message
+                        error_history.append(
+                            f"Iter {iteration}: Missing Video Error: {error_message}"
+                        )
+                # --- End INDENT ---
 
         except FileNotFoundError as e:
             error_message = f"Error related to file/directory setup: {e}"
