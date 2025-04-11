@@ -13,6 +13,10 @@ class GraphState(TypedDict):
         rubric: Content of the evaluation rubric.
         max_iterations: Maximum number of generation/validation attempts.
         iteration: Current iteration number (1-based).
+        general_context: Optional general context/instructions for the generator.
+        previous_code_attempt: Optional previous code provided for enhancement.
+        enhancement_request: Optional description of the requested enhancements.
+        final_command: Optional final instruction/prompt for the generator.
         generated_output: Agent's output in the current iteration (code, text).
         validation_error: Error message from validation/execution (e.g., stderr).
         validated_artifact_path: Path to a validated artifact (e.g., video file), if any.
@@ -35,6 +39,10 @@ class GraphState(TypedDict):
     rubric: str
     max_iterations: int
     iteration: int
+    general_context: Optional[str]
+    previous_code_attempt: Optional[str]
+    enhancement_request: Optional[str]
+    final_command: Optional[str]
     generated_output: Optional[str]
     validation_error: Optional[str]
     validated_artifact_path: Optional[str]

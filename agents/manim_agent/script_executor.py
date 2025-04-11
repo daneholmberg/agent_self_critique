@@ -89,12 +89,31 @@ class ManimScriptExecutor:
             manim_output_dir_in_run = run_output_dir / manim_output_subdir_name
             relative_manim_output_dir = manim_output_dir_in_run.relative_to(base_cfg.BASE_DIR)
 
-            expected_video_subdir = Path(agent_cfg.MANIM_VIDEO_OUTPUT_RELATIVE_PATH)
-            expected_video_filename = Path(agent_cfg.EXPECTED_VIDEO_FILENAME)
-            expected_video_path_in_run = (
-                manim_output_subdir_name / expected_video_subdir / expected_video_filename
+            # Construct path considering the temp script name subdirectory
+            temp_script_stem = temp_script_path.stem
+
+            # Determine quality directory based on the flag used in the command
+            quality_flag_to_dir = {
+                "-ql": "480p15",  # Low quality
+                "-qm": "720p30",  # Medium quality
+                "-qh": "1080p60",  # High quality
+                "-qk": "2160p60",  # 4K quality
+            }
+            # Use the mapping, default to low quality if flag unknown (should match command)
+            quality_dir = quality_flag_to_dir.get(agent_cfg.MANIM_QUALITY_FLAG, "480p15")
+
+            # Construct filename from the configured scene name
+            scene_filename = f"{agent_cfg.GENERATED_SCENE_NAME}.mp4"
+
+            expected_video_full_path = (
+                run_output_dir
+                / "manim_media"
+                / "videos"  # Base video directory
+                / temp_script_stem  # Subdirectory named after the script file
+                / quality_dir  # e.g., 480p15
+                / scene_filename  # e.g., GeneratedScene.mp4
             )
-            expected_video_full_path = run_output_dir / expected_video_path_in_run
+            expected_video_path_in_run = expected_video_full_path.relative_to(run_output_dir)
 
             command = [
                 "python",
@@ -191,7 +210,7 @@ class ManimScriptExecutor:
                     )
                     updates_to_state["validation_error"] = concise_error_for_llm
                     error_history.append(
-                        f"Iter {iteration}: Manim Execution Error:\n{error_message}"  # Keep full error in history
+                        f"Iter {iteration}: Manim Execution Error:\n{concise_error_for_llm}"  # Keep concise error in history
                     )
             else:
                 print("Manim execution successful (return code 0).")

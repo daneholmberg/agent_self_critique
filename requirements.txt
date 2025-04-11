@@ -8,6 +8,7 @@ langchain-google-genai==2.1.2
 python-dotenv==1.1.0
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
+opencv-python
 
 # Testing
 pytest==8.3.2

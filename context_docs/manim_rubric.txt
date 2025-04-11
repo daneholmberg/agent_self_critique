@@ -1,33 +1,62 @@
- **Manim Video Evaluation Rubric (v2 - Aesthetics Enhanced)**
+**Manim Eval Rubric (v3.2-Condensed/Granular)**
 
-**Instructions:** Evaluate the provided video segment based *strictly* on the corresponding input script text, associated metadata (like timestamps, if provided), and the criteria below. Prioritize accuracy and clarity, but also consider visual appeal using standard Manim capabilities.
+**Instructions:** Evaluate video vs. script/metadata with a critical eye.
+Think of the point of view of a viewer. Do they understand what's happening? Do things move with good pace? Is it too much to take in at once?
+Prioritize accuracy/clarity, then aesthetics (standard Manim).
 
-**1. Script Fidelity & Content Accuracy:**
-    *   **Core Concepts:** Accurately represents main subjects/ideas from the script?
-    *   **Key Actions:** Essential actions/transformations visualized?
-    *   **Presence:** Crucial elements present? Distracting unscripted elements absent?
+**Part A: Core Requirements (PASS/FAIL - ALL MUST PASS)**
 
-**2. Timing & Synchronization (Evaluate ONLY if timestamps provided):**
-    *   **Event Alignment:** Visual events reasonably close (+/- 1s) to specified timestamps?
-    *   **Pacing:** Animation timing feels appropriate for the segment's duration/actions?
+1.  **Accuracy (P/F):** Represents core concepts/info? Essential actions/elements present? No misleading extras?
+2.  **Clarity/Framing (P/F):** Primary text legible? Critical elements distinguishable? No essential info fully obscured by overlap? Critical elements mostly on-screen?
+3.  **Timing (P/F, if timestamps provided):** Key events roughly sync (+/- 1.5s)? Pacing not critically broken?
 
-**3. Visual Clarity & Composition:**
-    *   **Readability:** Text legible (size, contrast, duration)? Objects distinguishable?
-    *   **Layout & Spacing:** Elements arranged clearly? Good use of space? Scene uncluttered? Consistent alignment?
-    *   **Overlap:** Elements avoid obstructing critical information?
-    *   **Framing:** Important elements fully within frame?
-    *   **Color & Contrast:** Effective use of color for clarity and visual distinction? Good contrast between elements and background?
+**Part B: Qualitative Assessment (1-5 Scale)**
+*(Benchmark: Provided examples ≈ 3-4. Scores 1 or 2 in ANY category trigger FAILURE)*
 
-**4. Animation Quality & Engagement:**
-    *   **Smoothness:** Animations relatively smooth? (Ignore minor rendering glitches).
-    *   **Relevance & Engagement:** Are standard Manim animations (e.g., FadeIn, Write, Transform, Grow) used *effectively* and *relevantly* to enhance understanding or visual interest? Avoids overly distracting/jarring effects.
+1.  **Layout & Composition (1-5):** (Clarity, Organization, Use of Space)
+    *   1: Chaotic/Cluttered (**FAIL**)
+    *   2: Functional but messy (**FAIL**)
+    *   3: Acceptable, clear enough (Baseline)
+    *   4: Good, organized, well-spaced (Baseline+)
+    *   5: Excellent, balanced, strong hierarchy, polished
 
-**Overall Assessment:**
+2.  **Contrast & Readability (1-5):** (Element vs Background, Text Legibility)
+    *   1: Very low contrast, illegible elements/text (**FAIL**)
+    *   2: Barely sufficient contrast, difficult reading (**FAIL**)
+    *   3: Adequate contrast, functional readability (Baseline)
+    *   4: Good contrast, clear readability (Baseline+)
+    *   5: Excellent contrast, high readability, aids focus
 
-*   **Summary:** Briefly state if the video successfully visualizes the script segment according to the criteria. Mention key strengths/weaknesses, including comments on **visual appeal (layout, color, animation choices)**.
-*   **(Constraint Guidance):** Basic accuracy (Crit. 1) and clarity (Crit. 3) are essential for PASS. Shortcomings *only* in aesthetic aspects (parts of Crit. 3 like color/spacing, or Crit. 4 engagement) should be noted but typically **should not cause a FAIL** unless they severely harm readability or accuracy. Do not expect complex custom artistry.
-*   **Conclusion:** Conclude with the exact phrase required:
-    *   **"Overall Assessment: PASS"** if criteria 1 & 3 are met adequately (prioritizing accuracy/readability/framing), and criterion 2 if applicable.
-    *   **"Overall Assessment: FAIL"** if major inaccuracies (Crit. 1), critical clarity/composition problems (Crit. 3 - readability, framing, severe clutter/overlap), or critical timing failures (Crit. 2, if applicable).
+3.  **Color Palette & Style (1-5):** (Cohesion, Appeal, Distinction)
+    *   1: Clashing/Jarring colors, visually unpleasant (**FAIL**)
+    *   2: Bland, muddy, or inconsistent colors (**FAIL**)
+    *   3: Acceptable palette, colors functional (Baseline)
+    *   4: Good, cohesive palette, aids distinction, appealing (Baseline+)
+    *   5: Excellent, strategic color use, visually polished & distinct
 
-**(Self-Correction Reminder for LLM):** Focus on the segment/script. Prioritize accuracy and clarity. Encourage good standard aesthetics but do not demand perfection or non-standard effects. Note aesthetic issues but only fail if core requirements are unmet.**
+4.  **Animation Quality (1-5):** (Smoothness, Technical Execution)
+    *   1: Very jerky, glitchy, broken animations (**FAIL**)
+    *   2: Noticeably choppy or abrupt animations (**FAIL**)
+    *   3: Mostly smooth standard animations (Baseline)
+    *   4: Smooth and fluid animations (Baseline+)
+    *   5: Seamless, polished technical execution
+
+5.  **Animation Effectiveness (1-5):** (Relevance, Pacing, Clarity Aid, Engagement)
+    *   1: Irrelevant/Distracting animations, hinders understanding (**FAIL**)
+    *   2: Animations feel random, poorly paced, add little value (**FAIL**)
+    *   3: Relevant standard animations, adequate pacing (Baseline)
+    *   4: Animations enhance understanding, good pacing, engaging (Baseline+)
+    *   5: Purposeful animations significantly clarify/engage, excellent pacing
+
+**Part C: Overall Assessment**
+
+1.  **Part A Verdict:** (YES/NO) - All Core Requirements Met?
+2.  **Part B Scores:** Layout:#, Contrast:#, Palette:#, AnimQual:#, AnimEff:#
+3.  **Part B Average:** (Calculate average score across 5 categories)
+4.  **Qualitative Check:** Any B score 1 or 2? (YES/NO). Is B average < 4.1? (YES/NO)
+5.  **Summary:** Brief overall success? Strengths/Weaknesses (ref. specific Part B scores)? State reason for failure if applicable (Part A fail, Low B score, Low B avg).
+6.  **Conclusion:**
+    *   If Part A Verdict=NO OR Any B score is 1/2 OR Part B Average < 4.1: **"Overall Assessment: FAIL"**
+    *   Otherwise (Part A=YES AND All B scores >= 3 AND B Average >= 4.1): **"Overall Assessment: PASS"**
+
+**(LLM Reminder):** Check A first. Then check ALL B scores: ANY 1 or 2 = FAIL. Calculate B average: < 4.1 = FAIL. If A passes AND B scores all >= 3 AND B average >= 4.1, then PASS. Use refs as 3-4 baseline. 5 = polished use of *standard* tools. Note reason for failure.**

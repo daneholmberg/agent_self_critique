@@ -1,5 +1,5 @@
 from langgraph.graph import END, StateGraph
-from typing import Callable
+from typing import Callable, Optional
 from langgraph.pregel import Pregel  # Assuming CompiledGraph is Pregel
 
 from core.graph_state import GraphState
@@ -63,6 +63,7 @@ def build_graph(
     generate_node_func: Callable[[GraphState], dict],
     validate_node_func: Callable[[GraphState], dict],
     evaluate_node_func: Callable[[GraphState], dict],
+    modify_rubric_node_func: Optional[Callable[[GraphState], dict]] = None,
 ) -> Pregel:
     """
     Builds and compiles the generic LangGraph workflow.
@@ -71,6 +72,7 @@ def build_graph(
         generate_node_func: The function to execute for the 'generate_output' node.
         validate_node_func: The function to execute for the 'validate_output' node.
         evaluate_node_func: The function to execute for the 'evaluate_output' node.
+        modify_rubric_node_func: Optional function for the 'modify_rubric' node.
 
     Returns:
         The compiled LangGraph application.
@@ -82,8 +84,16 @@ def build_graph(
     workflow.add_node("validate_output", validate_node_func)
     workflow.add_node("evaluate_output", evaluate_node_func)
 
-    # Set entry point
-    workflow.set_entry_point("generate_output")
+    # Conditionally add the rubric modifier node if provided
+    if modify_rubric_node_func:
+        workflow.add_node("modify_rubric", modify_rubric_node_func)
+        # Set entry point to rubric modifier
+        workflow.set_entry_point("modify_rubric")
+        # Edge from rubric modifier to generator
+        workflow.add_edge("modify_rubric", "generate_output")
+    else:
+        # Set entry point to generator if no rubric modifier
+        workflow.set_entry_point("generate_output")
 
     # Add edges
     workflow.add_edge("generate_output", "validate_output")

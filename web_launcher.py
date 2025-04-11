@@ -8,11 +8,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Import the new router
+from api import config_routes as config_api
+
 # Load .env file from project root before anything else
 dotenv.load_dotenv(dotenv.find_dotenv())
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Include the config API router
+app.include_router(config_api.router)
 
 # Enable CORS
 origins = [
@@ -35,8 +41,11 @@ app.add_middleware(
 # Define request data model
 class AgentRunRequest(BaseModel):
     script_segment: str
-    script_context: Optional[str] = None
-    metadata: Optional[str] = None
+    general_context: Optional[str] = None
+    previous_code_attempt: Optional[str] = None
+    enhancement_request: Optional[str] = None
+    final_command: Optional[str] = None
+    scene_name: str
     save_generated_code: bool = False
 
 
@@ -49,13 +58,10 @@ async def run_agent(agent_name: str, request_data: AgentRunRequest):
     print(f"--- Received request for agent: {agent_name} ---")
     runner_module_path = f"agents.{agent_name}.runner"
 
-    # --- Debugging Path Info ---
-    print(f"DEBUG (web_launcher): os.getcwd() = {os.getcwd()}")
-    print(f"DEBUG (web_launcher): sys.path = {sys.path}")
     # Explicitly add project root to path
     project_root = os.path.dirname(os.path.abspath(__file__))
     if project_root not in sys.path:
-        print(f"DEBUG (web_launcher): Adding {project_root} to sys.path")
+
         sys.path.insert(0, project_root)
     # --- End Debugging ---
 
@@ -65,17 +71,12 @@ async def run_agent(agent_name: str, request_data: AgentRunRequest):
             runner_module_path.split(".")[:-1]
         )  # e.g., agents.manim_agent
         if parent_package_path:
-            print(
-                f"DEBUG (web_launcher): Attempting to import parent '{parent_package_path}' first..."
-            )
+
             importlib.import_module(parent_package_path)
-            print(f"DEBUG (web_launcher): Successfully imported parent '{parent_package_path}'.")
         # --- End Test ---
 
         # Dynamically import the specific agent runner module
-        print(f"DEBUG (web_launcher): Attempting to import '{runner_module_path}'...")
         runner_module = importlib.import_module(runner_module_path)
-        print(f"DEBUG (web_launcher): Successfully imported '{runner_module_path}'.")
 
     except ModuleNotFoundError as e:
         print(f"Error during import: {e}")  # Print the specific error
@@ -105,12 +106,16 @@ async def run_agent(agent_name: str, request_data: AgentRunRequest):
     # Call the agent's execute function
     try:
         print(f"Calling {runner_module_path}.execute...")
-        # Await the async execute function
+        # Await the async execute function with updated arguments
         result_dict = await runner_module.execute(
             script_segment=request_data.script_segment,
-            script_context=request_data.script_context,
-            input_metadata=request_data.metadata,
+            general_context=request_data.general_context,
+            previous_code_attempt=request_data.previous_code_attempt,
+            enhancement_request=request_data.enhancement_request,
+            final_command=request_data.final_command,
+            scene_name=request_data.scene_name,
             save_generated_code=request_data.save_generated_code,
+            # run_output_dir_override could be added here if needed in request
         )
         print("Agent execution finished.")
 
@@ -138,13 +143,32 @@ async def read_root():
 
 if __name__ == "__main__":
     import uvicorn
-    from config import base_config  # Import to get BASE_OUTPUT_DIR
+    from config import base_config  # Keep this if needed elsewhere, but not for excludes now
 
-    # Construct the exclude pattern dynamically based on config
-    # This assumes BASE_OUTPUT_DIR is relative to project root
-    output_dir_name = base_config.BASE_OUTPUT_DIR.name
-    reload_excludes_pattern = f"{output_dir_name}/*"
-    print(f"Uvicorn reload excluding: {reload_excludes_pattern}")
+    # Define patterns to explicitly INCLUDE for reloading
+    # Watch .py files within these core directories recursively
+    include_patterns = [
+        "web_launcher.py",
+        "agents/**/*.py",
+        "core/**/*.py",
+        "config/**/*.py",
+        "api/**/*.py",
+        ".env",  # Reload if environment variables change
+    ]
+
+    # Define patterns to EXCLUDE
+    # Start by excluding all Python files, then add specific directories like outputs
+    exclude_patterns = [
+        "**/*.py",  # Exclude ALL .py files first
+        "**/__pycache__/*",  # Ignore pycache
+        "**/*.pyc",  # Ignore compiled python
+        "outputs/**",  # Ignore everything in outputs
+        # Add other specific directories/files to ignore if needed
+        # e.g., "venv/**", ".git/**"
+    ]
+
+    print(f"Uvicorn reload including: {include_patterns}")
+    print(f"Uvicorn reload excluding: {exclude_patterns}")
 
     # Run the app using uvicorn
     uvicorn.run(
@@ -152,5 +176,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        reload_excludes=[reload_excludes_pattern],  # Add exclusion
+        reload_includes=include_patterns,
+        reload_excludes=exclude_patterns,
     )

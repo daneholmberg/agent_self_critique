@@ -1,6 +1,7 @@
 import os
 import pathlib
 import dotenv
+from pathlib import Path
 
 from config.base_config import PROJECT_ROOT, BASE_OUTPUT_DIR
 
@@ -25,6 +26,9 @@ ENV_RUBRIC_FILE = "MANIM_RUBRIC_FILE"  # Path to the rubric file (relative to PR
 ENV_VIDEO_EVAL_MAX_SIZE_MB = "MANIM_VIDEO_EVAL_MAX_SIZE_MB"  # Max video size in MB for evaluation
 ENV_GENERATED_SCENE_NAME = "MANIM_GENERATED_SCENE_NAME"  # Default scene name if not specified
 ENV_SAVE_GENERATED_CODE = "MANIM_SAVE_GENERATED_CODE"  # Flag to save generated code per iteration
+# NEW: Video Evaluation Frame Extraction Config
+ENV_VIDEO_EVAL_FPS = "MANIM_VIDEO_EVAL_FPS"  # Frames per second to extract for evaluation
+ENV_VIDEO_EVAL_MAX_FRAMES = "MANIM_VIDEO_EVAL_MAX_FRAMES"  # Max frames to send for evaluation
 
 # --- Load Actual Manim Configuration Values ---
 # Load configuration values from environment variables, falling back to defaults if not set.
@@ -59,6 +63,9 @@ VIDEO_EVAL_MAX_SIZE_MB = int(os.getenv(ENV_VIDEO_EVAL_MAX_SIZE_MB, "19"))
 
 # The default name for the Manim Scene class to be generated if not provided in the request
 GENERATED_SCENE_NAME = os.getenv(ENV_GENERATED_SCENE_NAME, "GeneratedScene")
+# NEW: Video Evaluation Frame Extraction Config
+VIDEO_EVAL_FRAMES_PER_SECOND = int(os.getenv(ENV_VIDEO_EVAL_FPS, "1"))  # Default to 1 FPS
+VIDEO_EVAL_MAX_FRAMES = int(os.getenv(ENV_VIDEO_EVAL_MAX_FRAMES, "40"))  # Default max 20 frames
 
 # Flag to determine if generated code should be saved permanently per iteration
 # Defaults to False (0). Set to 1 or true in .env to enable.
@@ -94,3 +101,25 @@ if not CONTEXT_FILE_PATH.is_file():
 # You might want to add more validation here, e.g.:
 # - Check if MANIM_QUALITY_FLAG is one of the expected values.
 # - Ensure VIDEO_EVAL_MAX_SIZE_MB is a positive integer.
+
+# Constants
+MANIM_MODULE_NAME = "manim_scene.py"
+DEFAULT_OUTPUT_DIR = Path("outputs/manim_agent")
+DEFAULT_LOG_FILE = "manim_agent_run.log"
+DEFAULT_MANIM_RENDER_QUALITY = "low"  # Options: low, medium, high, production, 4k
+
+# NEW: Default prompts for Code Generator
+DEFAULT_GENERATOR_GENERAL_CONTEXT = """
+Consider the overall tone and purpose of the script segment.
+Prioritize clarity and visual appeal in the animation.
+Keep animations concise and directly relevant to the text.
+Avoid overuse of text. Text can be effective as titles or for emphasizing key points as a summary, but should be used sparingly.
+Use Manim's capabilities effectively, but avoid overly complex effects unless necessary.
+"""
+
+DEFAULT_GENERATOR_FINAL_COMMAND = """
+Generate the Python code for a Manim scene that effectively visualizes the provided 'Segment to Animate'.
+Ensure the code defines a class named 'GeneratedScene'.
+Adhere strictly to Manim v0.19 syntax and best practices based on the documentation context.
+Produce clean, readable, and functional Python code.
+"""

@@ -4,6 +4,7 @@ import shutil
 import datetime
 import uuid
 import sys
+import re  # Import re for filename sanitization
 from typing import Tuple, Optional, Dict, Any
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from agents.manim_agent import llm_clients
 from agents.manim_agent.code_generator import ManimCodeGenerator
 from agents.manim_agent.script_executor import ManimScriptExecutor
 from agents.manim_agent.video_evaluator import ManimVideoEvaluator
+from agents.manim_agent.rubric_modifier import RubricModifier
 from core.log_utils import log_run_details
 
 # --- Run Counter Helper ---
@@ -67,10 +69,13 @@ def load_context_and_rubric(context_path: Path, rubric_path: Path) -> Tuple[str,
 # --- Refactored execute function (now async) ---
 async def execute(
     script_segment: str,
-    script_context: Optional[str] = None,
-    input_metadata: Optional[str] = None,
-    save_generated_code: bool = agent_cfg.SAVE_GENERATED_CODE_DEFAULT,  # Get default from config
-    run_output_dir_override: Optional[str] = None,  # Allow overriding output dir
+    general_context: Optional[str] = None,
+    previous_code_attempt: Optional[str] = None,
+    enhancement_request: Optional[str] = None,
+    final_command: Optional[str] = None,
+    scene_name: str = "UnnamedScene",  # Added scene_name with default
+    save_generated_code: bool = agent_cfg.SAVE_GENERATED_CODE_DEFAULT,
+    run_output_dir_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main execution function for the Manim agent (async). Processes input arguments directly.
@@ -79,8 +84,11 @@ async def execute(
 
     Args:
         script_segment: The text segment to be animated.
-        script_context: Optional full script context for the generator.
-        input_metadata: Optional metadata string.
+        general_context: Optional general context for the generator.
+        previous_code_attempt: Optional previous code to enhance.
+        enhancement_request: Optional description of requested enhancements.
+        final_command: Optional final command for the generator.
+        scene_name: The user-provided name for the scene (used for filenames).
         save_generated_code: Whether to save generated code iterations.
         run_output_dir_override: Optional run output directory override.
 
@@ -112,7 +120,6 @@ async def execute(
         return result  # Early exit
 
     prompt_text = script_segment
-    full_script_context = script_context  # Already optional
     print("Received and validated input arguments.")
 
     # --- New: Setup Run Directory ---
@@ -148,11 +155,10 @@ async def execute(
     try:
         print("Instantiating Manim agent components...")
         text_llm, eval_llm = llm_clients.get_llm_clients()
-        code_generator = ManimCodeGenerator(
-            llm_text_client=text_llm, script_context=full_script_context
-        )
+        code_generator = ManimCodeGenerator(llm_text_client=text_llm)
         script_executor = ManimScriptExecutor()
         video_evaluator = ManimVideoEvaluator(llm_eval_client=eval_llm)
+        rubric_modifier = RubricModifier(llm_client=text_llm)
         print("Manim agent components instantiated.")
     except Exception as e:
         error_message = f"Error during component instantiation: {e}"
@@ -164,6 +170,7 @@ async def execute(
     generate_func = code_generator.generate_manim_code
     validate_func = script_executor.execute_manim_script
     evaluate_func = video_evaluator.evaluate_manim_video
+    modify_rubric_func = rubric_modifier.modify_rubric_for_enhancement
     print("Node functions retrieved.")
 
     # 5. Prepare Paths & Context
@@ -184,17 +191,25 @@ async def execute(
 
     # 6. Build Graph
     print("Building the execution graph...")
-    app = build_graph(generate_func, validate_func, evaluate_func)
+    app = build_graph(
+        generate_func,
+        validate_func,
+        evaluate_func,
+        modify_rubric_func if enhancement_request else None,
+    )
     print("Graph built successfully.")
 
     # 7. Prepare Initial State
     initial_state = GraphState(
         input_text=prompt_text,
-        input_metadata=input_metadata,
         context_doc=context_doc,
         rubric=rubric,
         max_iterations=base_cfg.MAX_ITERATIONS,
         iteration=0,
+        general_context=general_context,
+        previous_code_attempt=previous_code_attempt,
+        enhancement_request=enhancement_request,
+        final_command=final_command,
         generated_output=None,
         validation_error=None,
         validated_artifact_path=None,
@@ -204,11 +219,9 @@ async def execute(
         evaluation_history=[],
         final_output_path=None,
         final_artifact_path=None,
-        infrastructure_error=None,  # Initialize explicitly
-        # --- New fields for state ---
-        run_output_dir=str(run_output_dir),  # Pass absolute path as string
+        infrastructure_error=None,
+        run_output_dir=str(run_output_dir),
         save_generated_code=save_generated_code,
-        # --- End New ---
     )
     print("Initial state prepared.")
 
@@ -238,16 +251,22 @@ async def execute(
         result["success"] = True
         result["message"] = "Agent task completed and evaluation passed."
 
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_id = str(uuid.uuid4())[:8]
-        # --- Adjusted: Use run_output_dir ---
+        # --- Adjusted: Use scene_name and run_number for filename ---
         run_output_path_obj = Path(final_state["run_output_dir"])
-        base_filename = f"{agent_name}_{timestamp}_{unique_id}"
-        # final_output_path_obj = agent_cfg.FINAL_AGENT_OUTPUT_DIR / f"{base_filename}_code.py"
-        # final_artifact_path_obj = agent_cfg.FINAL_AGENT_OUTPUT_DIR / f"{base_filename}_video.mp4"
-        final_output_path_obj = run_output_path_obj / f"{base_filename}_code.py"
-        final_artifact_path_obj = run_output_path_obj / f"{base_filename}_video.mp4"
+        run_number_str = run_output_path_obj.name  # Extract run number part (e.g., run_001)
+
+        # Sanitize scene_name for use in filename
+        sanitized_scene_name = re.sub(r"\s+", "_", scene_name)  # Replace spaces with underscores
+        sanitized_scene_name = re.sub(
+            r"[^a-zA-Z0-9_\-]", "", sanitized_scene_name
+        )  # Remove non-alphanumeric (allow _ and -)
+        sanitized_scene_name = sanitized_scene_name or "scene"  # Use 'scene' if name becomes empty
+
+        base_filename = f"{sanitized_scene_name}"
         # --- End Adjustment ---
+
+        final_output_path_obj = run_output_path_obj / f"{base_filename}.py"
+        final_artifact_path_obj = run_output_path_obj / f"{base_filename}.mp4"
 
         if final_state.get("generated_output"):
             try:
