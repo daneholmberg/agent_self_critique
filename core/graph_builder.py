@@ -84,7 +84,7 @@ def build_graph(
     workflow.add_node("validate_output", validate_node_func)
     workflow.add_node("evaluate_output", evaluate_node_func)
 
-    # Conditionally add the rubric modifier node if provided
+    # Reverted entry point logic
     if modify_rubric_node_func:
         workflow.add_node("modify_rubric", modify_rubric_node_func)
         # Set entry point to rubric modifier
@@ -99,6 +99,7 @@ def build_graph(
     workflow.add_edge("generate_output", "validate_output")
 
     # Add conditional edges
+    # Conditional edge after validation
     workflow.add_conditional_edges(
         "validate_output",
         decide_after_validation,

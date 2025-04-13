@@ -2,9 +2,16 @@ import { useState, useEffect } from 'react'
 // import reactLogo from './assets/react.svg'
 // import viteLogo from '/vite.svg'
 import './App.css'
+import GenerationTab from './components/GenerationTab'; // Assuming component path
+import IdeationTab from './components/IdeationTab';     // Assuming component path
 
 function App() {
-  // State variables
+  // --- State Variables ---
+
+  // Tab Management
+  const [activeTab, setActiveTab] = useState('Ideation'); // Start on Ideation tab
+
+  // Generation State (moved from top-level)
   const [scriptSegment, setScriptSegment] = useState("");
   const [generalContext, setGeneralContext] = useState("");
   const [previousCodeAttempt, setPreviousCodeAttempt] = useState("");
@@ -12,11 +19,23 @@ function App() {
   const [finalCommand, setFinalCommand] = useState("");
   const [sceneName, setSceneName] = useState("");
   const [saveGeneratedCode, setSaveGeneratedCode] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [responseOutput, setResponseOutput] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false); // Renamed from isLoading
+  const [generationOutput, setGenerationOutput] = useState(""); // Renamed from responseOutput
   const [errorLoadingDefaults, setErrorLoadingDefaults] = useState("");
 
-  // Fetch default configuration on component mount
+  // Ideation State
+  const [ideationInputText, setIdeationInputText] = useState("");
+  const [ideationOtherInfo, setIdeationOtherInfo] = useState("");
+  const [ideationInitialIdea, setIdeationInitialIdea] = useState("");
+  const [numIdeas, setNumIdeas] = useState(3); // Added state, default 3
+  const [generatedIdeas, setGeneratedIdeas] = useState([]);
+  const [isIdeating, setIsIdeating] = useState(false);
+  const [ideationError, setIdeationError] = useState("");
+
+
+  // --- Effects ---
+
+  // Fetch default configuration on component mount (for Generation Tab)
   useEffect(() => {
     const fetchDefaults = async () => {
       try {
@@ -31,26 +50,89 @@ function App() {
       } catch (error) {
         console.error("Error fetching config defaults:", error);
         setErrorLoadingDefaults(`Error loading default prompts: ${error.message}. Using empty defaults.`);
-        setGeneralContext("");
-        setFinalCommand("");
+        // Don't reset here, allow existing values if defaults fail
+        // setGeneralContext("");
+        // setFinalCommand("");
       }
     };
     fetchDefaults();
   }, []);
 
-  // API call handler
-  const handleRunAgent = async () => {
-    setIsLoading(true);
-    setResponseOutput("");
+  // --- Handlers ---
 
+  // Handler for generating ideas (called from IdeationTab)
+  const handleGenerateIdeas = async () => {
+    if (!ideationInputText.trim()) {
+      setIdeationError("Error: 'Input Text for Ideation' is required.");
+      return;
+    }
+    setIsIdeating(true);
+    setGeneratedIdeas([]);
+    setIdeationError("");
+
+    const requestBody = {
+      input_text: ideationInputText,
+      other_info: ideationOtherInfo || null,
+      initial_idea: ideationInitialIdea || null,
+      num_ideas: numIdeas || 3, // Added num_ideas, fallback to 3 if null/0
+    };
+
+    try {
+      console.log("Calling backend /api/v1/manim/ideate with:", requestBody);
+      
+      const response = await fetch('http://localhost:8000/api/v1/manim/ideate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        let errorDetail = 'Failed to fetch ideas';
+        try {
+          const errorData = await response.json();
+          errorDetail = errorData.detail || response.statusText;
+        } catch (jsonError) {
+          // If parsing error JSON fails, use the status text
+          errorDetail = response.statusText;
+        }
+        throw new Error(errorDetail);
+      }
+
+      const data = await response.json();
+      setGeneratedIdeas(data.generated_ideas || []);
+
+    } catch (error) {
+      console.error("Ideation API call failed:", error);
+      setIdeationError(`Error generating ideas: ${error.message}`);
+      setGeneratedIdeas([]);
+    } finally {
+      setIsIdeating(false);
+    }
+  };
+
+  // Handler for selecting an idea (called from IdeationTab)
+  const handleIdeaSelection = (selectedIdea) => {
+    setScriptSegment(selectedIdea); // Pre-populate the generation script segment
+    // Optionally clear other generation fields if needed
+    // setPreviousCodeAttempt(""); 
+    // setEnhancementRequest("");
+    setActiveTab('Generation'); // Switch to the Generation tab
+  };
+
+  // Handler for running the main agent (passed to GenerationTab)
+  const handleRunAgent = async () => {
+    setIsGenerating(true);
+    setGenerationOutput("");
+
+    // Validation (can also be done within GenerationTab)
     if (!scriptSegment.trim()) {
-      setResponseOutput("Error: 'Script Segment to Animate' is required.");
-      setIsLoading(false);
+      setGenerationOutput("Error: 'Script Segment to Animate' is required.");
+      setIsGenerating(false);
       return;
     }
     if (!sceneName.trim()) {
-        setResponseOutput("Error: 'Scene Name' is required.");
-        setIsLoading(false);
+        setGenerationOutput("Error: 'Scene Name' is required.");
+        setIsGenerating(false);
         return;
     }
 
@@ -67,129 +149,113 @@ function App() {
     try {
       const response = await fetch('http://localhost:8000/run/manim_agent', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody),
       });
 
-      const result = await response.json();
+      const result = await response.json(); // Assume backend returns the final state or relevant parts
 
-      if (response.ok) {
-        let output = `--- Run Result ---`;
-        if (result.error_history && result.error_history.length > 0) {
-            output += `\\n\\nErrors Encountered:\\n${result.error_history.join('\\n')}`;
-        }
-        if (result.evaluation_history && result.evaluation_history.length > 0) {
-            output += `\\n\\nEvaluation History:\\n${result.evaluation_history.join('\\n')}`;
-        }
-        if (result.validated_artifact_path) {
-             output += `\\n\\nValidated Artifact: ${result.validated_artifact_path}`;
-        } else if (result.generated_output && !result.validation_error) {
-             output += `\\n\\nGenerated Code (Validation Pending/Failed):\n\`\`\`python\n${result.generated_output}\n\`\`\``;
-        } else if (result.validation_error) {
-            output += `\\n\\nValidation Error: ${result.validation_error}`;
-        } else if (result.generated_output) {
-            output += `\\n\\nGenerated Output:\\n${result.generated_output}`;
-        } else if (!result.error_history || result.error_history.length === 0) {
-            output += "\\n\\nExecution initiated, check server logs/output directory for details.";
-        }
+      // Improved Output Processing (Example)
+      let output = `--- Run Result (${response.status}) ---\
+`;
+      output += `Success: ${result.success || false}\
+`;
+      output += `Message: ${result.message || (response.ok ? 'Completed' : 'Failed')}\
+`;
 
-        setResponseOutput(output.trim());
-
-      } else {
-        setResponseOutput(`Error: ${response.status} ${response.statusText}\\n${result.detail || 'Unknown error'}`);
+      if (result.final_artifact_path) {
+        output += `Final Artifact: ${result.final_artifact_path}\
+`;
+      } else if (result.final_output_path) {
+        output += `Final Code Output: ${result.final_output_path}\
+`;
       }
+      // Add history if present (consider summarizing long histories)
+      if (result.final_state?.error_history?.length) {
+        output += `\nError History:\n - ${result.final_state.error_history.join('\n - ')}\
+`;
+      }
+       if (result.final_state?.evaluation_history?.length) {
+        output += `\nEvaluation History:\n - ${result.final_state.evaluation_history.join('\n - ')}\
+`;
+      }
+
+      setGenerationOutput(output.trim());
+
     } catch (error) {
-      setResponseOutput(`Network or parsing error: ${error.message}`);
+      setGenerationOutput(`Network or parsing error: ${error.message}`);
       console.error("API call failed:", error);
     } finally {
-      setIsLoading(false);
+      setIsGenerating(false);
     }
   };
 
-
+  // --- Render --- 
   return (
     <>
       <h1>Manim Agent Launcher</h1>
 
-      {errorLoadingDefaults && <p className="error-message">{errorLoadingDefaults}</p>}
-
-      <label htmlFor="generalContext">General Context</label>
-      <textarea
-        id="generalContext"
-        value={generalContext}
-        onChange={(e) => setGeneralContext(e.target.value)}
-        placeholder="General instructions, style guidance, etc."
-      />
-
-      <label htmlFor="scriptSegment">Script Segment to Animate <span style={{color: 'red'}}>*</span></label>
-      <textarea
-        id="scriptSegment"
-        value={scriptSegment}
-        onChange={(e) => setScriptSegment(e.target.value)}
-        required
-        aria-required="true"
-        placeholder="The specific text segment the Manim scene should visualize."
-      />
-
-      <label htmlFor="previousCodeAttempt">Previous Code Attempt (Optional)</label>
-      <textarea
-        id="previousCodeAttempt"
-        value={previousCodeAttempt}
-        onChange={(e) => setPreviousCodeAttempt(e.target.value)}
-        placeholder="Paste the previous code here if you want to enhance it."
-      />
-
-      <label htmlFor="enhancementRequest">What We Want Enhanced (Optional)</label>
-      <textarea
-        id="enhancementRequest"
-        value={enhancementRequest}
-        onChange={(e) => setEnhancementRequest(e.target.value)}
-        placeholder="Describe the specific changes or improvements needed for the previous code."
-      />
-
-      <label htmlFor="sceneName">Scene Name <span style={{color: 'red'}}>*</span></label>
-      <input
-        type="text"
-        id="sceneName"
-        value={sceneName}
-        onChange={(e) => setSceneName(e.target.value)}
-        required
-        aria-required="true"
-        placeholder="A short, descriptive name (used for filenames)"
-      />
-
-      <label htmlFor="finalCommand">Final Command</label>
-      <textarea
-        id="finalCommand"
-        value={finalCommand}
-        onChange={(e) => setFinalCommand(e.target.value)}
-        placeholder="The final instruction for the LLM (e.g., Generate the code...)"
-      />
-
-      <div className="toggle-switch">
-        <input
-          type="checkbox"
-          id="saveCodeToggle"
-          checked={saveGeneratedCode}
-          onChange={(e) => setSaveGeneratedCode(e.target.checked)}
-        />
-        <label htmlFor="saveCodeToggle">Save Generated Code Per Iteration</label>
+      {/* Tab Navigation */}
+      <div className="tab-navigation">
+        <button 
+          className={activeTab === 'Ideation' ? 'active' : ''} 
+          onClick={() => setActiveTab('Ideation')}
+        >
+          1. Ideation
+        </button>
+        <button 
+          className={activeTab === 'Generation' ? 'active' : ''} 
+          onClick={() => setActiveTab('Generation')}
+        >
+          2. Generation & Run
+        </button>
       </div>
 
-      <button onClick={handleRunAgent} disabled={isLoading}>
-        {isLoading ? 'Running...' : 'Run Manim Agent'}
-      </button>
+      {/* Tab Content */}
+      <div className="tab-content">
+        {activeTab === 'Ideation' && (
+          <IdeationTab 
+            ideationInputText={ideationInputText}
+            setIdeationInputText={setIdeationInputText}
+            ideationOtherInfo={ideationOtherInfo}
+            setIdeationOtherInfo={setIdeationOtherInfo}
+            ideationInitialIdea={ideationInitialIdea}
+            setIdeationInitialIdea={setIdeationInitialIdea}
+            numIdeas={numIdeas}
+            setNumIdeas={setNumIdeas}
+            generatedIdeas={generatedIdeas}
+            isIdeating={isIdeating}
+            ideationError={ideationError}
+            onGenerateIdeas={handleGenerateIdeas}
+            onSelectIdea={handleIdeaSelection}
+          />
+        )}
 
-      {responseOutput && (
-        <div>
-          <h2>Output:</h2>
-          <pre style={{ whiteSpace: 'pre-wrap', wordWrap: 'break-word' }}>{responseOutput}</pre>
-        </div>
-      )}
+        {activeTab === 'Generation' && (
+          <GenerationTab 
+            scriptSegment={scriptSegment}
+            setScriptSegment={setScriptSegment}
+            generalContext={generalContext}
+            setGeneralContext={setGeneralContext}
+            previousCodeAttempt={previousCodeAttempt}
+            setPreviousCodeAttempt={setPreviousCodeAttempt}
+            enhancementRequest={enhancementRequest}
+            setEnhancementRequest={setEnhancementRequest}
+            finalCommand={finalCommand}
+            setFinalCommand={setFinalCommand}
+            sceneName={sceneName}
+            setSceneName={setSceneName}
+            saveGeneratedCode={saveGeneratedCode}
+            setSaveGeneratedCode={setSaveGeneratedCode}
+            isGenerating={isGenerating}
+            generationOutput={generationOutput}
+            errorLoadingDefaults={errorLoadingDefaults}
+            onRunAgent={handleRunAgent}          
+          />
+        )}
+      </div>
     </>
-  )
+  );
 }
 
 export default App

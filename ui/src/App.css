@@ -1,8 +1,8 @@
 #root {
-  max-width: 800px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
-  text-align: left;
+  text-align: center;
 }
 
 label {
@@ -74,4 +74,83 @@ pre {
   margin-bottom: 0;
   font-weight: normal;
   cursor: pointer;
+}
+
+/* Additions */
+.tab-navigation {
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid #555;
+  padding-bottom: 0.5rem;
+}
+
+.tab-navigation button {
+  padding: 0.5rem 1rem;
+  margin-right: 0.5rem;
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: pointer;
+  background-color: #f0f0f0; /* Default tab background */
+  color: #333;
+  border-radius: 5px 5px 0 0;
+}
+
+.tab-navigation button.active {
+  background-color: #fff; /* Active tab background */
+  border-color: #555;
+  border-bottom: 1px solid #fff; /* Hide bottom border part */
+  margin-bottom: -1px; /* Overlap container border */
+  font-weight: bold;
+}
+
+.tab-content {
+  padding: 1rem;
+  border: 1px solid #555;
+  border-top: none;
+  border-radius: 0 0 5px 5px;
+  text-align: left;
+  background-color: #fff;
+}
+
+.ideas-container {
+  margin-top: 1.5rem;
+  border-top: 1px dashed #ccc;
+  padding-top: 1rem;
+}
+
+.ideas-container h3 {
+  margin-bottom: 0.5rem;
+}
+
+.ideas-container ul {
+  list-style: none;
+  padding: 0;
+}
+
+.idea-item {
+  border: 1px solid #eee;
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.idea-item:hover {
+  background-color: #e8f4ff; /* Light blue hover */
+}
+
+.error-message {
+  color: #d9534f; /* Red error text */
+  background-color: #f2dede; /* Light red background */
+  border: 1px solid #ebccd1;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+}
+
+.output-container {
+  margin-top: 1.5rem;
+  border-top: 1px solid #ccc;
+  padding-top: 1rem;
 }

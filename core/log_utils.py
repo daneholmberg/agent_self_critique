@@ -8,7 +8,7 @@ from typing import Any
 
 def log_run_details(
     run_output_dir: Path | str,
-    iteration: int,
+    attempt_number: int,
     node_name: str,
     log_category: str,
     content: Any,
@@ -22,7 +22,7 @@ def log_run_details(
 
     Args:
         run_output_dir: The Path object or string path to the run's output directory.
-        iteration: The current iteration number of the agent run.
+        attempt_number: The current attempt number (1-based) of the agent run.
         node_name: The name of the node or component generating the log.
         log_category: A string categorizing the log entry (e.g., "LLM Prompt",
                       "State Update", "Node Entry", "Error").
@@ -38,7 +38,7 @@ def log_run_details(
 
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
         log_prefix = (
-            f"[{timestamp}] Iteration={iteration} Node='{node_name}' Category='{log_category}'"
+            f"[{timestamp}] Attempt={attempt_number} Node='{node_name}' Category='{log_category}'"
         )
         if is_error:
             log_prefix += " Status='ERROR'"

@@ -6,7 +6,7 @@ from pathlib import Path
 from agents.manim_agent import config as manim_agent_config
 
 
-router = APIRouter(prefix="/api/v1/config", tags=["Configuration"])
+router = APIRouter(tags=["Configuration"])
 
 
 class ManimConfigDefaults(BaseModel):

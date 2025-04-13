@@ -11,6 +11,9 @@ from pydantic import BaseModel
 # Import the new router
 from api import config_routes as config_api
 
+# Import the new manim router
+from api import manim_routes as manim_api
+
 # Load .env file from project root before anything else
 dotenv.load_dotenv(dotenv.find_dotenv())
 
@@ -18,7 +21,9 @@ dotenv.load_dotenv(dotenv.find_dotenv())
 app = FastAPI()
 
 # Include the config API router
-app.include_router(config_api.router)
+app.include_router(config_api.router, prefix="/api/v1/config", tags=["Configuration"])
+# Include the manim API router
+app.include_router(manim_api.router, prefix="/api/v1/manim", tags=["Manim Agent"])
 
 # Enable CORS
 origins = [

@@ -1,130 +1,155 @@
-from typing import Dict, Optional
+import logging
+from typing import Dict, Any, Optional
 from pathlib import Path
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.language_models import BaseLanguageModel
 
-from core.graph_state import GraphState
+from agents.manim_agent.config import ManimAgentState, AGENT_NAME
 from core.log_utils import log_run_details
+
+logger = logging.getLogger(__name__)
 
 
 class RubricModifier:
-    """Handles dynamically modifying the evaluation rubric based on enhancement requests."""
+    """Handles modification of the evaluation rubric based on enhancement requests."""
 
-    def __init__(self, llm_client: ChatGoogleGenerativeAI):
+    NODE_NAME = "RubricModifier"
+
+    def __init__(self, llm_client: BaseLanguageModel):
         """
-        Initializes the rubric modifier with an LLM client.
+        Initializes the RubricModifier.
 
         Args:
-            llm_client: The pre-initialized Langchain LLM client.
+            llm_client: The LLM client for generating modified rubrics.
         """
+        if not llm_client:
+            raise ValueError("LLM client cannot be None for RubricModifier")
         self.llm_client = llm_client
+        self.prompt_template = self._build_prompt_template()
+        logger.info(f"RubricModifier initialized with LLM: {llm_client.__class__.__name__}")
 
-    def _build_rubric_modification_prompt(
-        self, original_rubric: str, enhancement_request: str
-    ) -> str:
-        """
-        Constructs the prompt to ask the LLM to add an enhancement criterion to the rubric.
-        """
-        return f"""You are tasked with updating an evaluation rubric for Manim video generation.
+    def _build_prompt_template(self) -> str:
+        """Builds the prompt template for the LLM call."""
+        return (
+            "You are an AI assistant helping to refine an evaluation rubric for a Manim animation. "
+            "The user wants to enhance a previous animation based on a specific request. "
+            "Your task is to update the original rubric to accurately reflect the *new* goals described in the enhancement request. "
+            "Focus ONLY on incorporating the enhancement criteria. Maintain the original rubric's structure and intent otherwise.\n\n"
+            "--- Original Rubric ---\n{original_rubric}\n--- End Original Rubric ---\n\n"
+            "--- Enhancement Request ---\n{enhancement_request}\n--- End Enhancement Request ---\n\n"
+            "Generate the **complete modified rubric** based on the enhancement request. Do not add explanations or commentary, only the rubric itself."
+        )
 
-Here is the original rubric:
---- START ORIGINAL RUBRIC ---
-{original_rubric}
---- END ORIGINAL RUBRIC ---
-
-A specific enhancement has been requested for the Manim code/video being generated:
---- START ENHANCEMENT REQUEST ---
-{enhancement_request}
---- END ENHANCEMENT REQUEST ---
-
-Please add one OR MORE new criterion to the rubric *specifically* related to fulfilling this enhancement request. This new criterion should be phrased clearly, you are allowed to be a little bit more verbose than the other sections to the rubric to make sure there's enough details that the grader can easily understand the new criterion. It must require a score of 4 (Good) or 5 (Excellent) on the standard 1-5 scale for the enhancement to be considered successfully implemented.
-
-Output ONLY the *complete*, updated rubric including the original criteria and the new enhancement criterion. Do not add any introductory text, explanations, or markdown formatting around the rubric itself.
-"""
-
-    def modify_rubric_for_enhancement(self, state: GraphState) -> Dict:
-        """Adds a criterion to the rubric based on the enhancement_request, if present."""
-        node_name = "RubricModifier"
+    async def modify_rubric_for_enhancement(self, state: ManimAgentState) -> Dict[str, Any]:
+        """Modifies the rubric if an enhancement is requested on the first attempt."""
         run_output_dir = Path(state["run_output_dir"])
-        # Use current iteration from state, node runs *before* generator increments it
-        current_iteration_number = state["iteration"]
+        # Use attempt_number (0-based index of *previous* attempts)
+        # This node runs at the start, so attempt_number is 0 for the first real attempt.
+        current_attempt_number = state.get("attempt_number", 0)
+        log_attempt = current_attempt_number + 1  # For logging purposes (1-based)
+
+        enhancement_request = state.get("enhancement_request")
+        original_rubric = state.get("initial_rubric")  # Use initial_rubric as the base
 
         log_run_details(
             run_output_dir,
-            current_iteration_number + 1,
-            node_name,
+            log_attempt,
+            self.NODE_NAME,
             "Node Entry",
-            f"Checking for rubric modification...",
+            f"Starting {self.NODE_NAME}...",
         )
 
-        original_rubric = state.get("rubric")
-        enhancement_request = state.get("enhancement_request")
-
-        # Only modify if it's the *first* iteration and an enhancement request exists
-        if current_iteration_number == 0 and enhancement_request and original_rubric:
-            prompt = self._build_rubric_modification_prompt(original_rubric, enhancement_request)
+        # Only modify if it's the *first* attempt (attempt_number is 0) and an enhancement request exists
+        if current_attempt_number == 0 and enhancement_request and original_rubric:
+            logger.info(
+                f"Attempt {log_attempt}: Enhancement request found, attempting to modify rubric."
+            )
             log_run_details(
                 run_output_dir,
-                current_iteration_number + 1,
-                node_name,
-                "LLM Prompt (Rubric Mod)",
-                prompt,
+                log_attempt,
+                self.NODE_NAME,
+                "Action",
+                "Enhancement request found on first attempt. Modifying rubric.",
             )
 
+            prompt = self.prompt_template.format(
+                original_rubric=original_rubric, enhancement_request=enhancement_request
+            )
+            log_run_details(run_output_dir, log_attempt, self.NODE_NAME, "LLM Prompt", prompt)
+
             try:
-                print(f"Calling LLM to modify rubric: {self.llm_client.model}")
-                response = self.llm_client.invoke(prompt)
-                modified_rubric = response.content.strip()  # Get the modified rubric text
+                logger.info(f"Calling Rubric Modifier LLM: {self.llm_client.__class__.__name__}")
+                response = await self.llm_client.ainvoke(prompt)
+                modified_rubric = (
+                    response.content if hasattr(response, "content") else str(response)
+                )
+                modified_rubric = modified_rubric.strip()
+
                 log_run_details(
                     run_output_dir,
-                    current_iteration_number + 1,
-                    node_name,
-                    "LLM Response (Rubric Mod)",
+                    log_attempt,
+                    self.NODE_NAME,
+                    "LLM Response",
                     modified_rubric,
                 )
 
                 if modified_rubric:
+                    logger.info("Successfully generated modified rubric.")
                     log_run_details(
                         run_output_dir,
-                        current_iteration_number + 1,
-                        node_name,
+                        log_attempt,
+                        self.NODE_NAME,
                         "Node Completion",
-                        "Rubric successfully modified for enhancement.",
+                        "Rubric modified successfully.",
                     )
-                    return {"rubric": modified_rubric}  # Return update
+                    return {"rubric": modified_rubric}  # Return only the updated rubric
                 else:
-                    warning_msg = "LLM returned empty response for rubric modification."
-                    print(f"Warning: {warning_msg}")
+                    logger.warning(
+                        "Rubric Modifier LLM returned empty content. Using original rubric."
+                    )
                     log_run_details(
                         run_output_dir,
-                        current_iteration_number + 1,
-                        node_name,
-                        "LLM Warning",
-                        warning_msg,
+                        log_attempt,
+                        self.NODE_NAME,
+                        "Warning",
+                        "LLM returned empty content. Using original rubric.",
+                        is_error=True,
                     )
-                    return {}  # No change
+                    # Fall through to return original rubric
 
             except Exception as e:
-                error_message = f"Gemini API Error during rubric modification: {e}"
-                print(f"ERROR: {error_message}")
+                error_message = f"Error during rubric modification LLM call: {e}"
+                logger.error(error_message, exc_info=True)
                 log_run_details(
                     run_output_dir,
-                    current_iteration_number + 1,
-                    node_name,
+                    log_attempt,
+                    self.NODE_NAME,
                     "LLM Error",
                     error_message,
                     is_error=True,
                 )
-                # Log as infrastructure error so it doesn't stop the main flow if rubric mod fails
-                return {"infrastructure_error": f"Rubric modification failed: {error_message}"}
+                # Fall through to return original rubric on error
 
-        else:
-            # No enhancement request or not the first iteration
-            log_run_details(
-                run_output_dir,
-                current_iteration_number + 1,
-                node_name,
-                "Node Completion",
-                "No rubric modification needed.",
-            )
-            return {}  # No changes to state
+        # If not first attempt, no enhancement request, no rubric, or modification failed:
+        # Use the rubric already in the state (which might be the initial or a previously modified one)
+        current_rubric = state.get("rubric", original_rubric)  # Fallback needed?
+        if current_attempt_number > 0:
+            log_message = "Not the first attempt, skipping rubric modification."
+        elif not enhancement_request:
+            log_message = "No enhancement request, skipping rubric modification."
+        else:  # Handle cases where modification failed or original_rubric was None
+            log_message = "Rubric modification skipped (no request/rubric, not first attempt, or modification failed). Using current/original rubric."
+
+        logger.info(log_message)
+        log_run_details(run_output_dir, log_attempt, self.NODE_NAME, "Info", log_message)
+        log_run_details(
+            run_output_dir,
+            log_attempt,
+            self.NODE_NAME,
+            "Node Completion",
+            "Rubric modification skipped or failed. Using existing rubric.",
+        )
+
+        # Return the current rubric (could be initial or unmodified)
+        # Ensure we always return *something* for the rubric key if expected by the graph.
+        return {"rubric": current_rubric}

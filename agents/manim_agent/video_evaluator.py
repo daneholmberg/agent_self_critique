@@ -5,18 +5,35 @@ import traceback
 import cv2
 import numpy as np
 import json
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 from pathlib import Path
+import logging
+import asyncio
+import mimetypes
+import tempfile
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.exceptions import OutputParserException
 from langchain_core.prompts import PromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field, ValidationError
+from langchain_core.language_models import BaseLanguageModel
 
 from agents.manim_agent import config as agent_cfg
 from core.graph_state import GraphState
 from core.log_utils import log_run_details
+from agents.manim_agent.config import (
+    ManimAgentState,
+    VIDEO_EVAL_MAX_SIZE_MB,
+    VIDEO_EVAL_FRAMES_PER_SECOND,
+    VIDEO_EVAL_MAX_FRAMES,
+)
+
+logger = logging.getLogger(__name__)
+
+# Constants for video processing
+MAX_VIDEO_SIZE_BYTES = VIDEO_EVAL_MAX_SIZE_MB * 1024 * 1024
 
 
 # --- Pydantic Models for Structured Output ---
@@ -40,12 +57,14 @@ Original Script Segment:
 Video Analysis:
 [The video frame content is provided as separate multimodal inputs]
 
-Provide detailed feedback addressing how well the video meets each point in the rubric based *only* on the provided frames. Conclude your evaluation with a JSON object matching the following format:
+Provide detailed feedback addressing how well the video meets each point in the rubric based *only* on the provided frames. 
+Remember this is python so true and false are True and False, not true and false.
+Conclude your evaluation with a JSON object EXACTLY matching the following format:
 
 ```json
 {{
-    "passed": boolean, // True if the video adequately meets the rubric, False otherwise
     "feedback": string // Detailed feedback explaining the pass/fail decision
+    "passed": boolean, // True if the video adequately meets the rubric, False otherwise
 }}
 ```
 """
@@ -56,11 +75,21 @@ class ManimVideoEvaluator:
 
     NODE_NAME = "VideoEvaluator"  # Class constant for node name
 
-    def __init__(self, llm_eval_client: ChatGoogleGenerativeAI):
-        """Initializes the evaluator with a multimodal LLM client."""
+    def __init__(self, llm_eval_client: BaseLanguageModel):
+        """
+        Initializes the video evaluator.
+
+        Args:
+            llm_eval_client: A pre-initialized Langchain multimodal LLM client.
+        """
+        if not llm_eval_client:
+            raise ValueError("Multimodal LLM client cannot be None for ManimVideoEvaluator")
         self.llm_eval_client = llm_eval_client
         self.parser = JsonOutputParser(pydantic_object=EvaluationResult)
         self.prompt_template = PromptTemplate.from_template(EVALUATION_PROMPT_TEMPLATE)
+        logger.info(
+            f"ManimVideoEvaluator initialized with LLM: {llm_eval_client.__class__.__name__}"
+        )
 
     # --- Frame Extraction Helpers --- #
 
@@ -126,372 +155,379 @@ class ManimVideoEvaluator:
         print(f"Successfully extracted and encoded {extracted_frame_count} frames.")
         return frames_payload
 
-    def _prepare_video_payload(self, video_path: str) -> Optional[List[Dict]]:
-        """Opens video, calculates indices, and processes selected frames."""
-        target_fps = agent_cfg.VIDEO_EVAL_FRAMES_PER_SECOND
-        max_frames_to_send = agent_cfg.VIDEO_EVAL_MAX_FRAMES
-        cap = None
+    async def _extract_frames(
+        self, video_path: str, output_dir: Path, fps: int
+    ) -> Optional[List[Path]]:
+        """Extracts frames from a video using ffmpeg."""
+        logger.info(f"Extracting frames from {video_path} at {fps} FPS...")
+        output_pattern = output_dir / "frame_%04d.png"
+        command = [
+            "ffmpeg",
+            "-i",
+            video_path,
+            "-vf",
+            f"fps={fps}",
+            str(output_pattern),
+            "-loglevel",  # Add logging level
+            "error",  # Only show errors
+        ]
         try:
-            print(f"Preparing video frames payload for: {video_path}")
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                print(f"ERROR: Could not open video file: {video_path}")
-                return None
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            stdout_decoded = stdout.decode().strip()
+            stderr_decoded = stderr.decode().strip()
 
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            print(f"Video Info: FPS={fps}, Total Frames={total_frames}")
-
-            if fps <= 0 or total_frames <= 0:
-                print(
-                    f"ERROR: Invalid video properties (FPS: {fps}, Frames: {total_frames}) for {video_path}"
+            if process.returncode != 0:
+                logger.error(
+                    f"ffmpeg failed (code {process.returncode}) to extract frames from {video_path}. Stderr: {stderr_decoded}"
                 )
                 return None
-
-            sorted_indices = self._calculate_frame_indices(
-                fps, total_frames, target_fps, max_frames_to_send
-            )
-
-            if not sorted_indices:
-                print("WARN: No valid frame indices calculated.")
-                return []  # Return empty list, not None, if no frames selected
-
-            frames_payload = self._process_selected_frames(cap, sorted_indices, video_path)
-
-            return frames_payload
-        except cv2.error as e:
-            print(f"ERROR: OpenCV error processing video {video_path}: {e}")
+            else:
+                if stderr_decoded:
+                    logger.warning(f"ffmpeg stderr (but process succeeded): {stderr_decoded}")
+                logger.info(f"ffmpeg stdout: {stdout_decoded if stdout_decoded else '[No stdout]'}")
+                # List generated frame files
+                extracted_frames = sorted(list(output_dir.glob("frame_*.png")))
+                if not extracted_frames:
+                    logger.warning(f"ffmpeg ran successfully but no frames found in {output_dir}")
+                    return []
+                logger.info(
+                    f"Successfully extracted {len(extracted_frames)} frames to {output_dir}"
+                )
+                return extracted_frames
+        except FileNotFoundError:
+            logger.error("ffmpeg command not found. Ensure ffmpeg is installed and in PATH.")
             return None
         except Exception as e:
-            print(f"ERROR: Unexpected error preparing video frame payload for {video_path}: {e}")
-            traceback.print_exc()
+            logger.error(f"Error running ffmpeg: {e}", exc_info=True)
             return None
-        finally:
-            if cap:
-                cap.release()
 
     # --- LLM Interaction Helpers --- #
 
-    def _parse_evaluation_response(self, llm_output: str) -> Tuple[bool, str]:
-        """Parses the LLM response to extract pass/fail and feedback."""
-        try:
-            print(f"--- Attempting to parse LLM output ---")
-            print(
-                f"Raw LLM Output (type: {type(llm_output)}):\n{repr(llm_output)}"
-            )  # Log raw string with repr
-
-            parsed_result = self.parser.parse(llm_output)
-            print(f"Parser Output Type: {type(parsed_result)}")
-            print(f"Parser Output Value: {parsed_result}")
-
-            # --- Investigation Step: Direct Pydantic Validation ---
-            try:
-                # Attempt parsing with standard json first
-                dict_result = json.loads(
-                    llm_output.strip()
-                )  # Ensure no leading/trailing whitespace
-                print("Successfully parsed with json.loads")
-                # Now validate with Pydantic
-                validated_model = EvaluationResult.model_validate(dict_result)
-                print(f"Successfully validated with Pydantic: {type(validated_model)}")
-                # If direct validation works, we use its result
-                return validated_model.passed, validated_model.feedback
-            except (json.JSONDecodeError, ValidationError, TypeError) as direct_e:
-                print(f"Direct JSON/Pydantic validation failed: {direct_e}")
-                # If direct validation fails, we fall back to the parser's potentially problematic output
-                # This keeps the previous workaround logic as a fallback
-                if isinstance(parsed_result, EvaluationResult):
-                    print("Falling back to parser's Pydantic object")
-                    return parsed_result.passed, parsed_result.feedback
-                elif isinstance(parsed_result, dict):
-                    print("Falling back to parser's dict object")
-                    passed = parsed_result.get("passed")
-                    feedback = parsed_result.get("feedback")
-                    if passed is None or feedback is None:
-                        raise ValueError(
-                            "Parsed dictionary missing 'passed' or 'feedback' key (fallback)"
-                        )
-                    return passed, feedback
-                else:
-                    # If neither direct validation nor parser output is usable
-                    raise TypeError(
-                        f"Unexpected parse result type after fallback: {type(parsed_result)}"
-                    )
-
-        except Exception as e:
-            print(f"Error parsing evaluation JSON: {e}")
-            # Fallback or re-raise depending on desired robustness
-            raise  # Re-raise to be caught by the main evaluation logic
-
-    def _invoke_and_parse_llm(
-        self,
-        message: HumanMessage,
-        run_output_dir: Path,
-        iteration: int,
-    ) -> Tuple[Optional[Tuple[bool, str]], Optional[str]]:
-        """Invokes the LLM, parses the response, and handles errors.
-
-        Returns:
-            Tuple containing:
-                - (passed, feedback) tuple if successful, else None.
-                - error_message string if an error occurred, else None.
-        """
-        llm_output = None
-        try:
-            log_run_details(
-                run_output_dir,
-                iteration,
-                self.NODE_NAME,
-                "LLM Call",
-                f"Calling Evaluation LLM: {self.llm_eval_client.model}",
-            )
-            response = self.llm_eval_client.invoke([message])
-            llm_output = response.content
-            log_run_details(
-                run_output_dir, iteration, self.NODE_NAME, "Raw Evaluation Output", llm_output
-            )
-
-            log_run_details(
-                run_output_dir,
-                iteration,
-                self.NODE_NAME,
-                "Parse Result",
-                "Attempting to parse JSON output.",
-            )
-            evaluation_passed, feedback = self._parse_evaluation_response(llm_output)
-            log_run_details(
-                run_output_dir,
-                iteration,
-                self.NODE_NAME,
-                "Parsed Result",
-                f"Passed: {evaluation_passed}, Feedback: {feedback}",
-            )
-            return (evaluation_passed, feedback), None  # Success
-
-        except Exception as e:
-            error_message = f"Error during evaluation LLM call or parsing: {e}"
-            tb_str = traceback.format_exc()
-            full_error_details = (
-                f"{error_message}\nLLM Output (if available):\n{llm_output}\nTraceback:\n{tb_str}"
-            )
-            log_run_details(
-                run_output_dir,
-                iteration,
-                self.NODE_NAME,
-                "LLM/Parsing Error",
-                full_error_details,
-                is_error=True,
-            )
-            return None, error_message  # Failure
+    # Note: _invoke_and_parse_llm and _parse_evaluation_response are removed
+    # Parsing is handled directly in evaluate_manim_video using self.parser
 
     # --- Main Orchestration Logic --- #
 
-    def _perform_pre_checks(
-        self,
-        state: GraphState,
-        run_output_dir: Path,
-        iteration: int,
-    ) -> Tuple[bool, Optional[Dict], Optional[Path], Optional[str], Optional[str]]:
-        """Performs initial checks on state and files.
-
-        Returns:
-            Tuple containing:
-                - bool: True if checks passed, False otherwise.
-                - Optional[Dict]: State updates if checks failed, else None.
-                - Optional[Path]: Full path to the video if checks passed, else None.
-                - Optional[str]: Evaluation rubric if checks passed, else None.
-                - Optional[str]: Input text if checks passed, else None.
-        """
-        evaluation_history = state.get("evaluation_history", [])
-        error_history = state.get("error_history", [])
-        validated_artifact_path_relative_to_run = state.get("validated_artifact_path")
-        evaluation_rubric = state.get("rubric")
-        input_text = state.get("input_text")
-
-        updates_to_state: Dict = {
-            "evaluation_feedback": None,
-            "evaluation_passed": None,
-            "evaluation_history": evaluation_history[:],  # Copy
-            "error_history": error_history[:],  # Copy
-            "infrastructure_error": None,
+    async def _perform_pre_checks(
+        self, state: ManimAgentState, run_output_dir: Path, current_attempt: int
+    ) -> Tuple[bool, Dict[str, Any], Optional[str], Optional[str], Optional[str]]:
+        """Performs initial checks for required state keys and file existence."""
+        updates_on_failure: Dict[str, Any] = {
+            "evaluation_result": None,
+            "evaluation_passed": False,  # Default to False on pre-check fail
         }
 
-        if not validated_artifact_path_relative_to_run:
-            error_message = "Evaluation skipped: No validated video artifact path found."
+        # Check required state keys
+        video_path_str = state.get("video_path")
+        evaluation_rubric = state.get("rubric")
+        # Use task_instruction as the input text reference
+        input_text = state.get("task_instruction")
+
+        if not video_path_str:
+            error_message = "Evaluation skipped: 'video_path' missing from state."
             log_run_details(
                 run_output_dir,
-                iteration,
+                current_attempt,
                 self.NODE_NAME,
                 "Input Error",
                 error_message,
                 is_error=True,
             )
-            updates_to_state["evaluation_feedback"] = error_message
-            updates_to_state["evaluation_passed"] = False
-            updates_to_state["error_history"].append(
-                f"Iter {iteration}: EVAL SKIPPED (No Path): {error_message}"
-            )
-            return False, updates_to_state, None, None, None
+            updates_on_failure["evaluation_result"] = {"feedback": error_message, "passed": False}
+            return False, updates_on_failure, None, None, None
 
         if not evaluation_rubric:
+            error_message = "Evaluation skipped: 'rubric' missing from state."
             log_run_details(
                 run_output_dir,
-                iteration,
-                self.NODE_NAME,
-                "Skipped",
-                "No evaluation rubric provided. Skipping evaluation.",
-            )
-            updates_to_state["evaluation_passed"] = True
-            updates_to_state["evaluation_feedback"] = "Evaluation skipped: No rubric provided."
-            updates_to_state["evaluation_history"].append(f"Iter {iteration}: Skipped (No Rubric)")
-            return False, updates_to_state, None, None, None
-
-        full_video_path = run_output_dir / validated_artifact_path_relative_to_run
-        if not full_video_path.exists():
-            error_message = (
-                f"Evaluation skipped: Video file not found at expected path: {full_video_path}."
-            )
-            log_run_details(
-                run_output_dir,
-                iteration,
+                current_attempt,
                 self.NODE_NAME,
                 "Input Error",
                 error_message,
                 is_error=True,
             )
-            updates_to_state["evaluation_feedback"] = error_message
-            updates_to_state["evaluation_passed"] = False
-            updates_to_state["error_history"].append(
-                f"Iter {iteration}: EVAL SKIPPED (File Missing): {error_message}"
+            updates_on_failure["evaluation_result"] = {"feedback": error_message, "passed": False}
+            return False, updates_on_failure, None, None, None
+
+        if not input_text:
+            # Log warning but proceed, evaluation might still be possible without it
+            logger.warning("'task_instruction' missing from state, evaluation context incomplete.")
+            log_run_details(
+                run_output_dir,
+                current_attempt,
+                self.NODE_NAME,
+                "Input Warning",
+                "'task_instruction' missing from state.",
             )
-            return False, updates_to_state, None, None, None
 
-        # If all checks pass
-        return True, None, full_video_path, evaluation_rubric, input_text
+        # Check if video file actually exists
+        if not Path(video_path_str).is_file():
+            error_message = f"Evaluation skipped: Video file not found at path: {video_path_str}"
+            log_run_details(
+                run_output_dir,
+                current_attempt,
+                self.NODE_NAME,
+                "File Error",
+                error_message,
+                is_error=True,
+            )
+            updates_on_failure["evaluation_result"] = {"feedback": error_message, "passed": False}
+            return False, updates_on_failure, None, None, None
 
-    def evaluate_manim_video(self, state: GraphState) -> Dict:
+        return True, {}, video_path_str, evaluation_rubric, input_text
+
+    async def evaluate_manim_video(self, state: ManimAgentState) -> Dict[str, Any]:
         """Evaluates the Manim video using frame extraction and a multimodal LLM."""
         run_output_dir = Path(state["run_output_dir"])
-        iteration = state["iteration"]
-        log_run_details(
-            run_output_dir, iteration, self.NODE_NAME, "Node Entry", f"Starting {self.NODE_NAME}..."
-        )
+        current_attempt = state.get("attempt_number", 0) + 1
 
-        # Perform pre-checks
-        checks_passed, failure_updates, full_video_path, evaluation_rubric, input_text = (
-            self._perform_pre_checks(state, run_output_dir, iteration)
-        )
-        if not checks_passed:
-            return failure_updates  # Return early if checks failed
-
-        # Initialize state update dictionary for this run
-        evaluation_history = state.get("evaluation_history", [])[:]
-        error_history = state.get("error_history", [])[:]
-
-        updates_to_state: Dict = {
-            "evaluation_feedback": None,
-            "evaluation_passed": None,
-            "evaluation_history": evaluation_history,
-            "error_history": error_history,
-            "infrastructure_error": None,  # Reset
-        }
-
-        # --- Prepare Prompt and Payload ---
         log_run_details(
             run_output_dir,
-            iteration,
+            current_attempt,
+            self.NODE_NAME,
+            "Node Entry",
+            f"Starting {self.NODE_NAME}...",
+        )
+
+        checks_passed, failure_updates, video_path, evaluation_rubric, input_text = (
+            await self._perform_pre_checks(state, run_output_dir, current_attempt)
+        )
+        if not checks_passed:
+            return failure_updates
+
+        updates_to_state: Dict[str, Any] = {
+            "evaluation_result": None,
+            "evaluation_passed": None,
+        }
+
+        log_run_details(
+            run_output_dir,
+            current_attempt,
             self.NODE_NAME,
             "Prepare Payload",
-            f"Extracting frames from video: {full_video_path}",
+            f"Preparing frames from video: {video_path}",
         )
-        # Now returns a list of frame payloads or None
-        frame_payloads = self._prepare_video_payload(str(full_video_path))
+        frame_payloads = await self._prepare_video_payload(video_path)
 
-        # Check if frame extraction failed or returned no frames
         if frame_payloads is None:
-            error_message = (
-                f"Evaluation skipped: Failed to extract frames from video {full_video_path}."
-            )
+            error_message = f"Evaluation failed: Could not prepare frames from video {video_path} (check size/ffmpeg errors)."
             log_run_details(
                 run_output_dir,
-                iteration,
+                current_attempt,
                 self.NODE_NAME,
-                "Input Error",
+                "Payload Error",
                 error_message,
                 is_error=True,
             )
-            updates_to_state["evaluation_feedback"] = error_message
+            updates_to_state["evaluation_result"] = {"feedback": error_message, "passed": False}
             updates_to_state["evaluation_passed"] = False
-            error_history.append(
-                f"Iter {iteration}: EVAL SKIPPED (Frame Extraction Failed): {error_message}"
-            )
             return updates_to_state
 
-        if not frame_payloads:  # Empty list means no frames selected/found
-            error_message = f"Evaluation skipped: No frames extracted from video {full_video_path}."
+        if not frame_payloads:
+            warning_message = f"Evaluation Warning: No frames extracted/selected from video {video_path}. Evaluation might be inaccurate."
             log_run_details(
                 run_output_dir,
-                iteration,
+                current_attempt,
                 self.NODE_NAME,
-                "Input Error",
-                error_message,
-                is_error=True,
+                "Payload Warning",
+                warning_message,
+                is_error=True,  # Log as error because evaluation can't proceed meaningfully
             )
-            updates_to_state["evaluation_feedback"] = error_message
+            updates_to_state["evaluation_result"] = {"feedback": warning_message, "passed": False}
             updates_to_state["evaluation_passed"] = False
-            error_history.append(
-                f"Iter {iteration}: EVAL SKIPPED (No Frames Extracted): {error_message}"
-            )
             return updates_to_state
 
         prompt_text = self.prompt_template.format(
-            evaluation_rubric=evaluation_rubric, input_text=input_text
+            evaluation_rubric=evaluation_rubric, input_text=input_text or "[Input text missing]"
         )
-        # Construct message with text prompt followed by all frame payloads
         message_content = [prompt_text] + frame_payloads
         message = HumanMessage(content=message_content)
 
         log_run_details(
-            run_output_dir, iteration, self.NODE_NAME, "Evaluation Prompt Text", prompt_text
-        )
-        # Avoid logging the full frame payloads, log count and path instead
-        log_run_details(
             run_output_dir,
-            iteration,
+            current_attempt,
             self.NODE_NAME,
-            "Evaluation Frames Info",
-            f"Using {len(frame_payloads)} frames from {full_video_path}",
+            "LLM Prompt",
+            prompt_text,
         )
-
-        # --- Call LLM ---
-        parsed_result, error_message = self._invoke_and_parse_llm(
-            message, run_output_dir, iteration
-        )
-
-        if parsed_result:
-            evaluation_passed, feedback = parsed_result
-            updates_to_state["evaluation_passed"] = evaluation_passed
-            updates_to_state["evaluation_feedback"] = feedback
-            evaluation_history.append(
-                f"Iter {iteration}: {'Passed' if evaluation_passed else 'Failed'} - {feedback}"
+        try:
+            logger.info(f"Calling Evaluation LLM: {self.llm_eval_client.__class__.__name__}")
+            response = await self.llm_eval_client.ainvoke([message])
+            response_text = response.content if hasattr(response, "content") else str(response)
+            log_run_details(
+                run_output_dir,
+                current_attempt,
+                self.NODE_NAME,
+                "LLM Response",
+                response_text,
             )
-        else:  # Error occurred during LLM call/parsing
-            # Treat evaluation failures as potential infrastructure errors or LLM flakiness
-            updates_to_state["infrastructure_error"] = error_message
-            updates_to_state["evaluation_passed"] = False  # Explicitly fail
-            updates_to_state["evaluation_feedback"] = (
-                f"Evaluation failed due to error: {error_message}"
-            )
-            error_history.append(
-                f"Iter {iteration}: EVAL INFRA ERROR: {error_message}"
-            )  # Keep error history lean
-            evaluation_history.append(f"Iter {iteration}: FAILED (Error: {error_message})")
 
-        log_run_details(
-            run_output_dir,
-            iteration,
-            self.NODE_NAME,
-            "Node Completion",
-            f"Finished {self.NODE_NAME}. Updates: { {k:v for k,v in updates_to_state.items() if k not in ['error_history', 'evaluation_history']} }",
-        )
+            # Parse the response using the robust JsonOutputParser
+            try:
+                log_run_details(
+                    run_output_dir,
+                    current_attempt,
+                    self.NODE_NAME,
+                    "Parse Result",
+                    "Attempting to parse JSON output using JsonOutputParser.",
+                )
+                parsed_result = self.parser.parse(response_text)
+
+                # Check the type of the parsed result
+                if isinstance(parsed_result, EvaluationResult):
+                    logger.info(
+                        f"Evaluation result (Pydantic): Pass={parsed_result.passed}, Feedback: {parsed_result.feedback[:100]}..."
+                    )
+                    updates_to_state["evaluation_result"] = (
+                        parsed_result.model_dump()
+                    )  # Store as dict
+                    updates_to_state["evaluation_passed"] = parsed_result.passed
+                elif isinstance(parsed_result, dict):
+                    logger.warning(
+                        f"Parsed result as dict (Pydantic validation might have partially failed): {parsed_result}"
+                    )
+                    # Attempt to access keys, default to False/Error message if missing
+                    passed = parsed_result.get("passed", False)
+                    feedback = parsed_result.get("feedback", "Error: Keys missing in parsed dict")
+                    updates_to_state["evaluation_result"] = parsed_result  # Store the dict directly
+                    updates_to_state["evaluation_passed"] = passed
+                    # Log potentially missing keys
+                    if "passed" not in parsed_result or "feedback" not in parsed_result:
+                        logger.error(
+                            f"Parsed dict missing 'passed' or 'feedback' key: {parsed_result}"
+                        )
+                        log_run_details(
+                            run_output_dir,
+                            current_attempt,
+                            self.NODE_NAME,
+                            "Parse Warning",
+                            f"Parsed dict missing 'passed' or 'feedback' key: {parsed_result}",
+                            is_error=True,
+                        )
+                        # Override feedback if keys missing
+                        updates_to_state["evaluation_result"][
+                            "feedback"
+                        ] = f"Error: Parsed dict missing keys. Original dict: {parsed_result}"
+                        updates_to_state["evaluation_passed"] = (
+                            False  # Ensure failure if keys missing
+                        )
+
+                    logger.info(
+                        f"Evaluation result (dict): Pass={passed}, Feedback: {str(feedback)[:100]}..."
+                    )
+                else:
+                    # This case should ideally not happen if parser works as expected
+                    raise TypeError(f"Unexpected parsed result type: {type(parsed_result)}")
+
+                log_run_details(
+                    run_output_dir,
+                    current_attempt,
+                    self.NODE_NAME,
+                    "Node Completion",
+                    f"Evaluation completed. Pass: {updates_to_state['evaluation_passed']}",
+                )
+            except OutputParserException as pe:
+                error_message = f"Evaluation failed: Could not parse LLM response using JsonOutputParser: {pe}\nRaw Response: {response_text[:500]}..."
+                logger.error(error_message)
+                log_run_details(
+                    run_output_dir,
+                    current_attempt,
+                    self.NODE_NAME,
+                    "Parse Error",
+                    error_message,
+                    is_error=True,
+                )
+                updates_to_state["evaluation_result"] = {"feedback": error_message, "passed": False}
+                updates_to_state["evaluation_passed"] = False
+
+        except Exception as e:
+            error_message = f"Error during evaluation LLM call: {e}"
+            logger.error(error_message, exc_info=True)
+            log_run_details(
+                run_output_dir,
+                current_attempt,
+                self.NODE_NAME,
+                "LLM Error",
+                f"{error_message}\n{traceback.format_exc()}",
+                is_error=True,
+            )
+            updates_to_state["evaluation_result"] = {"feedback": error_message, "passed": False}
+            updates_to_state["evaluation_passed"] = False
+
         return updates_to_state
+
+    # MODIFIED: Make async
+    async def _prepare_video_payload(self, video_path_str: str) -> Optional[List[Dict[str, Any]]]:
+        """Prepares the video payload: checks size, extracts frames, selects frames, encodes."""
+        video_path = Path(video_path_str)
+        if not video_path.is_file():
+            logger.error(f"Video file not found: {video_path}")
+            return None
+
+        # Check video size
+        video_size = video_path.stat().st_size
+        if video_size > MAX_VIDEO_SIZE_BYTES:
+            logger.warning(
+                f"Video size ({video_size / 1024**2:.2f} MB) exceeds limit ({VIDEO_EVAL_MAX_SIZE_MB} MB). Skipping frame extraction."
+            )
+            # Return a specific indicator? Or just None? Let's return None to signal failure.
+            return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            # Extract frames asynchronously
+            # MODIFIED: Directly await the async function
+            extracted_frames = await self._extract_frames(
+                str(video_path), temp_path, VIDEO_EVAL_FRAMES_PER_SECOND
+            )
+
+            if extracted_frames is None:
+                logger.error("Frame extraction failed.")
+                return None
+            if not extracted_frames:
+                logger.warning("No frames were extracted.")
+                return []
+
+            # Select frames (e.g., first N frames)
+            # Ensure we don't exceed the max frames *after* extraction
+            selected_frames = extracted_frames
+            if len(selected_frames) > VIDEO_EVAL_MAX_FRAMES:
+                logger.warning(
+                    f"Extracted {len(extracted_frames)} frames, exceeding limit {VIDEO_EVAL_MAX_FRAMES}. Selecting first {VIDEO_EVAL_MAX_FRAMES}."
+                )
+                selected_frames = extracted_frames[:VIDEO_EVAL_MAX_FRAMES]
+            else:
+                logger.info(
+                    f"Selected {len(selected_frames)} frames out of {len(extracted_frames)} (max: {VIDEO_EVAL_MAX_FRAMES})"
+                )
+
+            # Encode selected frames
+            payloads = []
+            for frame_path in selected_frames:
+                mime_type, _ = mimetypes.guess_type(frame_path)
+                if not mime_type or not mime_type.startswith("image/"):
+                    logger.warning(f"Could not determine image mime type for {frame_path}")
+                    continue
+                base64_data = self._encode_image_to_base64(frame_path)
+                if base64_data:
+                    payloads.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                        }
+                    )
+            return payloads
+
+    def _encode_image_to_base64(self, image_path: Path) -> Optional[str]:
+        """Encodes an image file to base64."""
+        try:
+            with open(image_path, "rb") as image_file:
+                return base64.b64encode(image_file.read()).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Error encoding image {image_path}: {e}", exc_info=True)
+            return None
