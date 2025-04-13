@@ -59,6 +59,8 @@ Video Analysis:
 
 Provide detailed feedback addressing how well the video meets each point in the rubric based *only* on the provided frames. 
 Remember this is python so true and false are True and False, not true and false.
+Remember you only see at roughly 1 frame per second, so you will may only catch the middle of a transition and not the full thing. 
+So you need to take this into account when judging the video.
 Conclude your evaluation with a JSON object EXACTLY matching the following format:
 
 ```json
