@@ -5,6 +5,7 @@ import datetime
 import uuid
 import sys
 import re  # Import re for filename sanitization
+import logging  # Added logging import
 from typing import Tuple, Optional, Dict, Any, List
 from pathlib import Path
 
@@ -27,6 +28,9 @@ from agents.manim_agent.rubric_modifier import RubricModifier
 from agents.manim_agent.components.failure_summarizer import FailureSummarizer
 from core.log_utils import log_run_details
 from core.llm.client_factory import create_llm_client
+
+# Add logger instance
+logger = logging.getLogger(__name__)
 
 # --- Run Counter Helper ---
 COUNTER_FILE_PATH = base_cfg.BASE_OUTPUT_DIR / "run_counter.txt"
@@ -85,10 +89,10 @@ def build_agent_graph(
     script_executor: ManimScriptExecutor,
     video_evaluator: ManimVideoEvaluator,
     failure_summarizer: FailureSummarizer,
-    rubric_modifier: Optional[RubricModifier] = None,
+    rubric_modifier: RubricModifier,  # Made mandatory
 ) -> StateGraph:
     """Builds the LangGraph StateGraph for the Manim agent."""
-    print("Building Manim Agent Graph V2 with Failure Summarization...")
+    print("Building Manim Agent Graph V3 with required Rubric Modification...")
 
     # --- Define Node Functions within builder scope to access components via closure ---
     async def generate_code_node(state: ManimAgentState) -> Dict[str, Any]:  # Only takes state
@@ -167,27 +171,22 @@ def build_agent_graph(
             "evaluation_passed": result.get("evaluation_passed"),
         }
 
-    async def modify_rubric_node(state: ManimAgentState) -> Dict[str, Any]:  # Only takes state
-        """Node to potentially modify the rubric based on enhancement requests."""
-        print("\n--- Node: Modify Rubric (If Enhancement Requested) ---")
-        # Always pass through essential context keys
-        updates = {
-            "run_output_dir": state.get("run_output_dir"),
-            "scene_name": state.get("scene_name"),
-            "save_generated_code": state.get("save_generated_code"),
+    async def modify_rubric_node(state: ManimAgentState) -> Dict[str, Any]:
+        """Node to modify the rubric based on the user request and context."""
+        print("\n--- Node: Modify Rubric --- ")
+        # Always call the modifier
+        result = await rubric_modifier.modify_rubric(state)  # Use the correct method name
+        print(f"Rubric modification attempted.")
+        # Return the result which contains the potentially modified 'rubric'
+        # Keep other essential keys for the next node if necessary
+        return {
+            "rubric": result.get("rubric"),
+            # Pass through essential context needed downstream (if any)
+            # Example: If generator needs these explicitly passed from this node:
+            # "run_output_dir": state.get("run_output_dir"),
+            # "scene_name": state.get("scene_name"),
+            # "save_generated_code": state.get("save_generated_code"),
         }
-        if state.get("enhancement_request") and rubric_modifier:  # Check if modifier exists
-            # Use rubric_modifier from outer scope
-            result = await rubric_modifier.modify_rubric_for_enhancement(state)
-            updates["rubric"] = result.get("rubric")  # Update only the rubric
-            print(f"Rubric potentially modified.")
-            return updates
-        else:
-            print(
-                "No enhancement request found or rubric_modifier not provided, skipping rubric modification."
-            )
-            # Still return the essential keys even if rubric doesn't change
-            return updates
 
     async def summarize_single_failure_node(
         state: ManimAgentState,
@@ -299,20 +298,18 @@ def build_agent_graph(
     graph = StateGraph(ManimAgentState)
 
     # Add nodes using the inner functions directly
+    graph.add_node("modify_rubric", modify_rubric_node)  # Add the rubric modifier node
     graph.add_node("generate_code", generate_code_node)
     graph.add_node("execute_script", execute_script_node)
     graph.add_node("evaluate_video", evaluate_video_node)
     graph.add_node("summarize_failure", summarize_single_failure_node)
     graph.add_node("append_summary", append_failure_summary_node)
 
-    if rubric_modifier:
-        graph.add_node("modify_rubric", modify_rubric_node)
-        graph.set_entry_point("modify_rubric")
-        graph.add_edge("modify_rubric", "generate_code")
-    else:
-        graph.set_entry_point("generate_code")
+    # Set the rubric modifier as the entry point
+    graph.set_entry_point("modify_rubric")
+    graph.add_edge("modify_rubric", "generate_code")
 
-    # Define edges and conditional logic (Conditional functions still outside)
+    # Define other edges and conditional logic (Conditional functions still outside)
     graph.add_edge("generate_code", "execute_script")
 
     graph.add_conditional_edges(
@@ -339,7 +336,7 @@ def build_agent_graph(
         "append_summary", check_attempt_limit, {END: END, "generate_code": "generate_code"}
     )
 
-    print("Manim Agent Graph V2 built.")
+    print("Manim Agent Graph V3 built.")
     return graph
 
 
@@ -482,7 +479,7 @@ async def execute(
         result["message"] = error_message
         return result
 
-    # 3. Load Context & Rubric (Moved before component instantiation needed them)
+    # 3. Load Context & Rubric
     try:
         context_doc, initial_rubric = load_context_and_rubric(
             agent_cfg.CONTEXT_FILE_PATH, agent_cfg.RUBRIC_FILE_PATH
@@ -501,6 +498,7 @@ async def execute(
     # 4. Instantiate Manim Agent Components
     try:
         print("Instantiating Manim agent components...")
+        # Create LLM Clients (ensure text_llm is suitable for rubric modification)
         text_llm = create_llm_client(
             provider=agent_cfg.LLM_PROVIDER,
             model_name=agent_cfg.TEXT_GENERATION_MODEL,
@@ -513,10 +511,12 @@ async def execute(
             temperature=0.1,
         )
 
+        # Instantiate components
         code_generator = ManimCodeGenerator(llm_text_client=text_llm)
         script_executor = ManimScriptExecutor()
         video_evaluator = ManimVideoEvaluator(llm_eval_client=eval_llm)
-        rubric_modifier = RubricModifier(llm_client=text_llm) if enhancement_request else None
+        # Always instantiate RubricModifier
+        rubric_modifier = RubricModifier(llm_client=text_llm)
         failure_summarizer = FailureSummarizer(
             llm=summarizer_llm,
             summarization_prompt_template=agent_cfg.DEFAULT_FAILURE_SUMMARY_PROMPT,
@@ -535,20 +535,20 @@ async def execute(
         script_executor=script_executor,
         video_evaluator=video_evaluator,
         failure_summarizer=failure_summarizer,
-        rubric_modifier=rubric_modifier,
+        rubric_modifier=rubric_modifier,  # Pass the mandatory modifier
     )
     app = app.compile()
     print("Graph built and compiled successfully.")
 
     # 6. Prepare Initial State using ManimAgentState
     initial_state = ManimAgentState(
-        initial_user_request=script_segment,
-        task_instruction=script_segment,
+        initial_user_request=script_segment,  # Use the primary input here
+        task_instruction=script_segment,  # Also use it for the first task instruction
         context_doc=context_doc,
-        rubric=initial_rubric,
-        initial_rubric=initial_rubric,
-        max_attempts=max_attempts,  # Renamed key
-        attempt_number=0,  # Renamed key, start at 0
+        rubric=initial_rubric,  # Start with the base rubric
+        initial_rubric=initial_rubric,  # Store the original base rubric
+        max_attempts=max_attempts,
+        attempt_number=0,
         general_context=general_context,
         previous_code_attempt=previous_code_attempt,
         enhancement_request=enhancement_request,
@@ -558,9 +558,11 @@ async def execute(
         script_file_path=None,
         execution_success=None,
         failure_summaries=[],
+        single_failure_summary=None,  # Add field for temporary summary storage
         video_path=None,
         evaluation_result=None,
         evaluation_passed=None,
+        failure_reason=None,  # Add field for passing failure reason to summarizer
         error_message=None,
         final_output=None,
         run_output_dir=str(run_output_dir),

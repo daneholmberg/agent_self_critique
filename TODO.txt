@@ -2,9 +2,9 @@ Allow for the entry point to be ideation. Between N different high temperature L
     This would be fed back to the UI for a selection to be made. So I guess this would be a seperate agent?
 ------------------
 
-The rubric evaluator needs more context (i forget what..)
+The rubric evaluator needs more context (i forget what..) did we do this?
 
-The task refiner needs the context of the rubric so it can give better advice/task
+I've also made adjustments to how failure reasons (validation_error from execution, feedback from evaluation) are explicitly passed to the summarize_single_failure_node using the conditional edge mapping feature of LangGraph
 
 Have a "think to self" node? If we can't get over the hump. To analyze past errors and current rubric. Maybe do this every time and add it to past history.
 "What did I try, what could i add?"
@@ -22,6 +22,6 @@ changes. If it's okay it launches the process we have now with the added specifi
 
 Through this process we can more easily shape what we want without giving it so much freedom to fail.
 
-Save any code and mp4 if it gets a 3.8? or higher
+
 
 Any mistakes should be added to a file. We can then take this file and generate a token optimized version of it so that we can try to prevent them in the future.
