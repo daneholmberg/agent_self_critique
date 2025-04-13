@@ -343,7 +343,7 @@ class ManimCodeGenerator:
         summarizer_prompt = f"""
         You are an expert prompt engineer assisting in a multi-turn AI workflow. Your goal is to refine the final 'Action Command' instruction for a Manim code generation AI based on the outcome of its previous attempt(s), considering the initial goal and any requested enhancements.
 
-        This refined 'Action Command' instruction will be placed at the *very end* of the main prompt given to the code generation AI. It's crucial that this instruction is clear, actionable, and leverages the context the code generation AI has already received (including Failure Summaries provided earlier in the prompt).
+        
 
         **Context Provided to Code Generation AI (Before the Command You Generate):**
         1. Manim programming rules and best practices.
@@ -361,12 +361,15 @@ class ManimCodeGenerator:
         - Validation Error (from LATEST attempt, if any): "{validation_error or 'None'}"
         - Evaluation Feedback (from LATEST attempt, if any): "{evaluation_feedback or 'None'}"
 
+        This refined 'Action Command' instruction will be placed at the *very end* of the main prompt given to the code generation AI. It's crucial that this instruction is clear, actionable, and leverages the context the code generation AI has already received (including Failure Summaries provided earlier in the prompt). NOTE THAT YOU SHOULD NOT INCLUDE INSTRUCTIONS ON HOW TO FIX ERRORS, ONLY REFER TO THE ERROR AND THE HISTORY OF FAILURES.
+
         **Your Task:**
         Generate ONLY the text content for the final 'Action Command' instruction. Apply strong prompt engineering principles:
         - Synthesize the 'Initial Primary Task Instruction' and the 'Enhancement Request' (if provided) to understand the *current* desired outcome.
         - Analyze the **Historical Failure Summaries** to identify any recurring issues or patterns.
         - Analyze the **Validation Error** and **Evaluation Feedback** to identify any specific issues.
         - Be specific about the *fixes* needed, directly referencing the key issues from the **latest** validation error and/or evaluation feedback, but also consider addressing any **persistent problems** revealed by the history. Focus on creating a single, actionable command for the *next* attempt.
+        But again, do not offer specific solutions about how to fix the error.
         - Clearly reiterate the core objective (incorporating the enhancement if applicable).
         - **CRITICAL**: Ensure the generated command explicitly instructs the code generation AI to define a Python class named '{scene_name}'.
         - Ensure the instruction is concise and guides the code generation AI effectively on its *next* attempt to achieve the desired outcome while fixing the errors described (both latest and historical patterns).
