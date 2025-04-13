@@ -260,27 +260,17 @@ def build_agent_graph(
     async def append_failure_summary_node(
         state: ManimAgentState,
     ) -> Dict[str, Any]:  # Only takes state
-        """Node to append the latest summary, increment attempt number, pass through context, and clear processed fields."""
+        """Node to append the latest summary, increment attempt number, and clear temporary summary field."""
         print("\n--- Node: Append Failure Summary & Increment Attempt ---")
         summary_to_append = state.get("single_failure_summary")
-        # Use attempt_number (0-based index of *previous* attempts)
         current_attempt_number = state.get("attempt_number", 0)
-        next_attempt_number = (
-            current_attempt_number + 1
-        )  # This will be the number for the *next* attempt
+        next_attempt_number = current_attempt_number + 1
 
-        # Start with essential context keys to pass through
+        # Initialize updates dictionary only with fields this node modifies
         updates: Dict[str, Any] = {
-            "run_output_dir": state.get("run_output_dir"),
-            "scene_name": state.get("scene_name"),
-            "save_generated_code": state.get("save_generated_code"),
-            # Add keys to be updated/cleared
-            "attempt_number": next_attempt_number,  # Renamed key
-            "validation_error": None,
-            "evaluation_result": None,
-            "single_failure_summary": None,
-            "execution_success": None,
-            "evaluation_passed": None,
+            "attempt_number": next_attempt_number,
+            "single_failure_summary": None,  # Always clear the temporary field
+            # DO NOT CLEAR evaluation state here, it should persist for the generator
         }
 
         if not summary_to_append:
@@ -289,17 +279,19 @@ def build_agent_graph(
             )
         else:
             print(f"Appending summary and incrementing attempt number to: {next_attempt_number}")
+            # Use add_messages correctly to update the list
+            # Important: Get the current list or default to empty before adding
             updated_summaries = add_messages(
                 state.get("failure_summaries", []), [summary_to_append]
             )
-            updates["failure_summaries"] = updated_summaries
+            updates["failure_summaries"] = (
+                updated_summaries  # Add the updated list to the dictionary
+            )
 
         print(f"Incrementing attempt number to: {next_attempt_number}")
-        # Ensure essential keys weren't somehow missed if they were None initially
-        if updates["run_output_dir"] is None:
-            logger.warning("run_output_dir was None in state before append_summary update!")
-            # Attempt to fetch again? Or raise error? For now, log warning.
 
+        # Only return the fields that were actually updated by this node.
+        # Other fields (validation_error, execution_success, etc.) remain untouched.
         return updates
 
     # --- End Node Function Definitions ---
@@ -413,7 +405,7 @@ async def execute(
     scene_name: str = agent_cfg.GENERATED_SCENE_NAME,
     save_generated_code: bool = agent_cfg.SAVE_GENERATED_CODE_DEFAULT,
     run_output_dir_override: Optional[str] = None,
-    max_attempts: int = 3,  # Renamed parameter
+    max_attempts: int = 10,  # Renamed parameter
 ) -> Dict[str, Any]:
     """
     Main execution function for the Manim agent (async). Processes input arguments directly.
@@ -674,7 +666,7 @@ async def execute(
         if final_state:
             fail_reason = "Unknown (check logs/state)."
             current_attempt = final_state.get("attempt_number", 0)
-            max_attempts = final_state.get("max_attempts", 3)
+            max_attempts = final_state.get("max_attempts")
             if not final_state.get("evaluation_passed") and final_state.get("evaluation_result"):
                 fail_reason = "Evaluation failed."
             elif final_state.get("validation_error"):

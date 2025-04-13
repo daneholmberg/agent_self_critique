@@ -4,7 +4,8 @@ import subprocess
 import uuid
 import re
 import traceback
-from typing import Dict, Any
+import logging
+from typing import Dict, Any, Optional
 from pathlib import Path
 
 from config import base_config as base_cfg
@@ -12,9 +13,88 @@ from agents.manim_agent import config as agent_cfg
 from agents.manim_agent.config import ManimAgentState
 from core.log_utils import log_run_details
 
+logger = logging.getLogger(__name__)
+
 
 class ManimScriptExecutor:
     """Handles the execution of generated Manim scripts and validates output."""
+
+    @staticmethod
+    def _extract_traceback_from_stderr(stderr: str) -> Optional[str]:
+        """
+        Parses stderr to extract the Python traceback and the final error line.
+        Tries Manim's formatted traceback first, then falls back to standard Python format.
+
+        Args:
+            stderr: The decoded standard error string.
+
+        Returns:
+            A string containing the formatted traceback and error, or None if not found by either method.
+        """
+        lines = stderr.strip().split("\n")
+
+        # --- Attempt 1: Parse Manim's Formatted Traceback ---
+        start_tb_idx = -1
+        end_tb_idx = -1
+        traceback_marker_found = False
+        for i, line in enumerate(lines):
+            stripped_line = line.strip()
+            if stripped_line.startswith("╭") and "Traceback" in stripped_line:
+                start_tb_idx = i
+                traceback_marker_found = True
+            elif stripped_line.startswith("╰") and traceback_marker_found:
+                end_tb_idx = i
+                break
+
+        if 0 <= start_tb_idx < end_tb_idx < len(lines):
+            logger.info("Found Manim-formatted traceback markers.")
+            traceback_lines = lines[start_tb_idx : end_tb_idx + 1]
+            error_line = None
+            for line in lines[end_tb_idx + 1 :]:
+                if line.strip():
+                    error_line = line.strip()
+                    break
+            result_lines = ["Extracted Manim Traceback and Error:"] + traceback_lines
+            if error_line:
+                result_lines.append(error_line)
+            return "\n".join(result_lines)
+
+        # --- Attempt 2: Parse Standard Python Traceback ---
+        logger.info("Manim markers not found, trying standard Python traceback format.")
+        start_std_tb_idx = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "Traceback (most recent call last):":
+                start_std_tb_idx = i
+                break
+
+        if start_std_tb_idx != -1:
+            traceback_block = [lines[start_std_tb_idx]]
+            end_std_tb_idx = start_std_tb_idx
+            for i in range(start_std_tb_idx + 1, len(lines)):
+                line = lines[i]
+                if line.startswith("  "):  # Standard indentation for traceback lines
+                    traceback_block.append(line)
+                    end_std_tb_idx = i
+                else:
+                    # Found the line after the indented block, assume it's the error
+                    if line.strip():  # Check if it's not just an empty line
+                        traceback_block.append(line)
+                        end_std_tb_idx = i
+                    break  # Stop after finding the error line or the end of indented block
+
+            if traceback_block:  # Check if we actually collected something
+                logger.info("Found standard Python traceback format.")
+                # Ensure the last line looks like an error (simple check for colon)
+                if ":" in traceback_block[-1] and not traceback_block[-1].startswith("  "):
+                    return "\n".join(["Extracted Standard Traceback and Error:"] + traceback_block)
+                else:
+                    logger.warning(
+                        "Found standard traceback header but block parsing seemed incomplete or error line missing."
+                    )
+
+        # --- Both Attempts Failed ---
+        logger.warning("Could not find standard or Manim traceback formats in stderr.")
+        return None
 
     async def execute_manim_script(self, state: ManimAgentState) -> Dict[str, Any]:
         """Executes the generated Manim script asynchronously and validates the output video."""
@@ -261,10 +341,11 @@ class ManimScriptExecutor:
                         is_error=True,
                     )
                     updates_to_state["validation_error"] = error_message
+                    updates_to_state["execution_success"] = False
 
             elif not timeout_occurred and return_code != 0:
-                full_error_output = f"Stderr:\n{stderr_decoded}\nStdout:\n{stdout_decoded}"
                 print(f"ERROR: Manim execution failed (code: {return_code}).")
+
                 cmd_line_error_pattern = r"(Usage:|Error: No such option|Error: Invalid argument|Error: unrecognized arguments)"
                 is_cmd_line_error = bool(
                     re.search(cmd_line_error_pattern, stderr_decoded, re.IGNORECASE)
@@ -285,20 +366,44 @@ class ManimScriptExecutor:
                     )
                     updates_to_state["validation_error"] = f"[Config/Command Error] {error_message}"
                 else:
-                    error_message = f"Manim script execution failed (code {return_code}). Stderr: {stderr_decoded[:1000]}..."
-                    print("Detected likely script error.")
+                    print("Detected likely script error. Attempting to extract traceback.")
+                    pruned_error = self._extract_traceback_from_stderr(stderr_decoded)
+
+                    if not pruned_error:
+                        # Fallback if traceback extraction fails: Use last N lines
+                        print(
+                            "Failed to extract specific traceback, using last 30 lines of stderr as fallback."
+                        )
+                        stderr_lines = stderr_decoded.strip().split("\n")
+                        last_n_lines = stderr_lines[-30:]  # Get the last 30 lines
+                        pruned_error = (
+                            f"Manim script execution failed (code {return_code}). Could not parse full traceback. Showing last {len(last_n_lines)} lines of stderr:\n---\n"
+                            + "\n".join(last_n_lines)
+                        )
+
+                        # Log the full output for debugging even if using fallback for the state
+                        log_run_details(
+                            run_output_dir,
+                            current_attempt,
+                            node_name,
+                            "Full Stderr Fallback (used last lines)",
+                            stderr_decoded,
+                            is_error=True,
+                        )
+
                     log_run_details(
                         run_output_dir,
                         current_attempt,
                         node_name,
                         "Script Error",
-                        error_message,
+                        pruned_error,
                         is_error=True,
                     )
-                    updates_to_state["validation_error"] = (
-                        f"Return Code: {return_code}\n{full_error_output}"
-                    )
+                    updates_to_state["validation_error"] = pruned_error
 
+                updates_to_state["execution_success"] = False
+
+            elif timeout_occurred:
                 updates_to_state["execution_success"] = False
 
         except Exception as e:
@@ -343,6 +448,6 @@ class ManimScriptExecutor:
             current_attempt,
             node_name,
             "Node Completion",
-            "Finished execution attempt.",
+            f"Finished execution attempt. Success: {updates_to_state.get('execution_success')}",
         )
         return updates_to_state

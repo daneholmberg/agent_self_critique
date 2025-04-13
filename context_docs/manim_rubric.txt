@@ -53,10 +53,10 @@ Prioritize accuracy/clarity, then aesthetics (standard Manim).
 1.  **Part A Verdict:** (YES/NO) - All Core Requirements Met?
 2.  **Part B Scores:** Layout:#, Contrast:#, Palette:#, AnimQual:#, AnimEff:#
 3.  **Part B Average:** (Calculate average score across 5 categories)
-4.  **Qualitative Check:** Any B score 1 or 2? (YES/NO). Is B average < 4.3? (YES/NO)
+4.  **Qualitative Check:** Any B score 1 or 2? (YES/NO). Is B average < 4.2? (YES/NO)
 5.  **Summary:** Brief overall success? Strengths/Weaknesses (ref. specific Part B scores)? State reason for failure if applicable (Part A fail, Low B score, Low B avg).
 6.  **Conclusion:**
-    *   If Part A Verdict=NO OR Any B score is 1/2 OR Part B Average < 4.3: **"Overall Assessment: FAIL"**
-    *   Otherwise (Part A=YES AND All B scores >= 3 AND B Average >= 4.3): **"Overall Assessment: PASS"**
+    *   If Part A Verdict=NO OR Any B score is 1/2 OR Part B Average < 4.2: **"Overall Assessment: FAIL"**
+    *   Otherwise (Part A=YES AND All B scores >= 3 AND B Average >= 4.2): **"Overall Assessment: PASS"**
 
-**(LLM Reminder):** Check A first. Then check ALL B scores: ANY 1 or 2 = FAIL. Calculate B average: < 4.3 = FAIL. If A passes AND B scores all >= 3 AND B average >= 4.3, then PASS. Use refs as 3-4 baseline. 5 = polished use of *standard* tools. Note reason for failure.**
+**(LLM Reminder):** Check A first. Then check ALL B scores: ANY 1 or 2 = FAIL. Calculate B average: < 4.2 = FAIL. If A passes AND B scores all >= 3 AND B average >= 4.2, then PASS. Use refs as 3-4 baseline. 5 = polished use of *standard* tools. Note reason for failure.**

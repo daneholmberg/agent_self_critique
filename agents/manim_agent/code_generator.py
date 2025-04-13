@@ -210,8 +210,7 @@ class ManimCodeGenerator:
                     f"\n--- Failed Attempt {attempt_number} (No Code from Previous Cycle Available) --- "
                 )
 
-            # --- NEW: Add Detailed Error from Last Execution ---
-            # Check if the previous step was specifically a failed execution
+            # --- NEW: Add Detailed Error from Last Execution Attempt ---
             if state.get("execution_success") is False:
                 detailed_error = state.get("validation_error")
                 if detailed_error:
@@ -223,6 +222,21 @@ class ManimCodeGenerator:
                         f"Execution success is False for attempt {attempt_number}, but no detailed 'validation_error' found in state."
                     )
             # --- End Detailed Error Section ---
+
+            # --- NEW: Add Detailed Feedback from Last Evaluation Attempt ---
+            elif state.get("evaluation_passed") is False:
+                evaluation_result_dict = state.get("evaluation_result", {})
+                detailed_feedback = evaluation_result_dict.get("feedback")
+                if detailed_feedback:
+                    prompt_lines.append("\n--- Detailed Feedback from Last Evaluation Attempt ---")
+                    prompt_lines.append(detailed_feedback)
+                    prompt_lines.append("--- End Detailed Feedback ---")
+                else:
+                    # This case might happen if evaluation_passed is False but the feedback is missing/empty
+                    logger.warning(
+                        f"Evaluation passed is False for attempt {attempt_number}, but no detailed 'feedback' found in evaluation_result."
+                    )
+            # --- End Detailed Feedback Section ---
 
             # Add specific feedback based on whether it's an enhancement retry or not
             if enhancement_request:
@@ -303,7 +317,7 @@ class ManimCodeGenerator:
         logger.info("Attempting to generate refined task instruction.")
         validation_error = state.get("validation_error")
         evaluation_result = state.get("evaluation_result")
-        evaluation_feedback = evaluation_result.get("reasoning") if evaluation_result else None
+        evaluation_feedback = evaluation_result.get("feedback") if evaluation_result else None
         failure_summaries = state.get("failure_summaries", [])
         scene_name = state.get("scene_name", agent_cfg.GENERATED_SCENE_NAME)  # Get scene name
 
@@ -340,6 +354,7 @@ class ManimCodeGenerator:
         6. (If applicable) The specific text detailing any ongoing enhancement request.
 
         **Your Input for Refinement:**
+        - # Add full context here, either rubric with answers on why it didn't pass or a detailed error message
         - Initial Primary Task Instruction: "{initial_goal}"
         - Enhancement Request (if applicable): "{enhancement_request or 'None'}"
         - Historical Failure Summaries:\n{formatted_summaries}
@@ -350,6 +365,7 @@ class ManimCodeGenerator:
         Generate ONLY the text content for the final 'Action Command' instruction. Apply strong prompt engineering principles:
         - Synthesize the 'Initial Primary Task Instruction' and the 'Enhancement Request' (if provided) to understand the *current* desired outcome.
         - Analyze the **Historical Failure Summaries** to identify any recurring issues or patterns.
+        - Analyze the **Validation Error** and **Evaluation Feedback** to identify any specific issues.
         - Be specific about the *fixes* needed, directly referencing the key issues from the **latest** validation error and/or evaluation feedback, but also consider addressing any **persistent problems** revealed by the history. Focus on creating a single, actionable command for the *next* attempt.
         - Clearly reiterate the core objective (incorporating the enhancement if applicable).
         - **CRITICAL**: Ensure the generated command explicitly instructs the code generation AI to define a Python class named '{scene_name}'.

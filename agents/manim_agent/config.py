@@ -147,7 +147,7 @@ Use Manim's capabilities effectively, but avoid overly complex effects unless ne
 
 # MODIFIED: Use {scene_name} placeholder
 DEFAULT_GENERATOR_FINAL_COMMAND = """
-Generate the Python code for a Manim scene that effectively visualizes the provided 'Segment to Animate'.
+Generate the Python code for a Manim scene that effectively visualizes the provided 'Primary Task Instruction'.
 Ensure the code defines a class named '{scene_name}' EXACTLY LETTER FOR LETTER THIS IS CRUCIAL.
 Adhere strictly to Manim v0.19 syntax and best practices based on the documentation context.
 Produce clean, readable, and functional Python code.

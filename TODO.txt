@@ -5,7 +5,11 @@ Allow for the entry point to be ideation. Between N different high temperature L
 The rubric evaluator needs more context (i forget what..)
 
 The task refiner needs the context of the rubric so it can give better advice/task
- 
+
+Have a "think to self" node? If we can't get over the hump. To analyze past errors and current rubric. Maybe do this every time and add it to past history.
+"What did I try, what could i add?"
+To build up this history better. History of runs is probably going to be key to get good results
+
 Give the video analyzer context that it can only see at N frames per second so it might not see transitions as well.
 
 I think for this to be more useful we just need to have a more back and forth process in general. The rubric should also be a thing I agree on. 
