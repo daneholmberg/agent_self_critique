@@ -55,7 +55,7 @@ MANIM_RULES = """# Manim Cursor Rules
 - Don't create overly complex animations when simpler ones would work
 - Avoid hard-coding coordinates without comments explaining their purpose
 - Changing code completely unrelated to the prompt or task given
-- Using CYAN, it's not a defined color. If you want to use a undefined color use ManimColor(HEX)
+- Using CYAN, LIGHT_BLUE manim colors, it's not a defined color. Favor using ManimColor(HEX) to get the specific color you want over using the manim color name.
 - Use ShowCreation, it's deprecated for Creation"""
 
 

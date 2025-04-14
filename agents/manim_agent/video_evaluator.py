@@ -57,7 +57,11 @@ Original Script Segment:
 Video Analysis:
 [The video frame content is provided as separate multimodal inputs]
 
-Provide detailed feedback addressing how well the video meets each point in the rubric based *only* on the provided frames. 
+Provide detailed feedback addressing how well the video meets each point in the rubric based *only* on the provided frames.
+The feedback should be detailed and you should give very rough and interpreable suggestions for improvement.
+This is especially true when it's a 4 and not a 5, in the past you won't give any critiques or feedback on 4's.
+Don't frame it like that's what they *have* to do, just something to think about.
+You can give out half points. So if you don't quite want to give it a 5 but you think it's *very* close, you can give a 4.5.
 Remember this is python so true and false are True and False, not true and false.
 Remember you only see at roughly 1 frame per second, so you will may only catch the middle of a transition and not the full thing. 
 So you need to take this into account when judging the video.

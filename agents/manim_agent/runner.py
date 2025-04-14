@@ -502,14 +502,14 @@ async def execute(
         text_llm = create_llm_client(
             provider=agent_cfg.LLM_PROVIDER,
             model_name=agent_cfg.TEXT_GENERATION_MODEL,
-            temperature=0.9,
+            temperature=0.9,  # DO NOT CHANGE ANY TEMPERATURES
         )
         summarizer_llm = text_llm
         eval_llm = create_llm_client(
             provider=agent_cfg.LLM_PROVIDER,
             model_name=agent_cfg.EVALUATION_MODEL,
-            temperature=0.1,
-        )
+            temperature=0.7,  # I'm using temperature on this model as I want it to give rough suggestions and I want some diversity
+        )  # DO NOT CHANGE ANY TEMPERATURES
 
         # Instantiate components
         code_generator = ManimCodeGenerator(llm_text_client=text_llm)
