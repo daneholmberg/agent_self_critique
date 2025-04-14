@@ -37,7 +37,7 @@ class SceneIdeator:
         self.system_prompt = (
             "You are a creative assistant specializing in visualizing concepts for Manim animations. "
             "Based on the user's input text and optional initial idea, generate a concise and compelling scene concept. "
-            "Focus on the core visual elements and actions. Describe ONE distinct scene concept. "
+            "Focus on the core visual elements and actions. Describe ONE distinct scene concept. DO NOT GENERATE CODE"
             # Add Manim-specific guidance if helpful, e.g., mentioning common objects or styles
             # "Consider using common Manim objects like Text, Square, Circle, Arrow, and transformations."
         )

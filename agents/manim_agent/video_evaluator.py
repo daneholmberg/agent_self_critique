@@ -63,6 +63,8 @@ This is especially true when it's a 4 and not a 5, in the past you won't give an
 Don't frame it like that's what they *have* to do, just something to think about.
 You can give out half points. So if you don't quite want to give it a 5 but you think it's *very* close, you can give a 4.5.
 Remember this is python so true and false are True and False, not true and false.
+Sometimes you say something is "missing" but it's really cutoff or offscreen. Attempt to recognize if something is completely missing
+or just offscreen and things need to be better structured.
 Remember you only see at roughly 1 frame per second, so you will may only catch the middle of a transition and not the full thing. 
 So you need to take this into account when judging the video.
 Conclude your evaluation with a JSON object EXACTLY matching the following format:

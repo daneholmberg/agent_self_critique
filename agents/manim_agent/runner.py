@@ -295,6 +295,8 @@ def build_agent_graph(
 
     # --- End Node Function Definitions ---
 
+    # IMPORTANT: If modifying the main retry loop (evaluate_video -> summarize_failure -> append_summary -> generate_code -> execute_script -> evaluate_video),
+    # ensure the 'nodes_in_graph' variable in the `execute` function's recursion_limit calculation is updated!
     graph = StateGraph(ManimAgentState)
 
     # Add nodes using the inner functions directly
@@ -537,7 +539,13 @@ async def execute(
         failure_summarizer=failure_summarizer,
         rubric_modifier=rubric_modifier,  # Pass the mandatory modifier
     )
-    app = app.compile()
+
+    # Calculate dynamic recursion limit: 1 (entry) + 5 nodes/loop * max_attempts, multiplied by safety_multiple for safety
+    safety_multiple = 3
+    nodes_in_graph = 5
+    calculated_recursion_limit = safety_multiple * (1 + max_attempts * nodes_in_graph)
+
+    app = app.compile(recursion_limit=calculated_recursion_limit)
     print("Graph built and compiled successfully.")
 
     # 6. Prepare Initial State using ManimAgentState

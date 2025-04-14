@@ -13,3 +13,5 @@ venv/
 
 outputs/
 media/
+
+**/benchmark_outputs/**
