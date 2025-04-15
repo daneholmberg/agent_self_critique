@@ -365,14 +365,56 @@ class ManimVideoEvaluator:
         )
         try:
             logger.info(f"Calling Evaluation LLM: {self.llm_eval_client.__class__.__name__}")
-            response = await self.llm_eval_client.ainvoke([message])
-            response_text = response.content if hasattr(response, "content") else str(response)
+            # Add timeout to prevent hanging
+            try:
+                # Create a task with an explicit timeout
+                llm_task = asyncio.create_task(self.llm_eval_client.ainvoke([message]))
+                response = await asyncio.wait_for(
+                    llm_task, timeout=180  # 3 minute timeout for video evaluation
+                )
+                logger.info(f"Video evaluation LLM response received within timeout")
+            except asyncio.TimeoutError:
+                logger.error(f"Video evaluation LLM request timed out after 180 seconds")
+                # Return error information
+                updates_to_state["evaluation_result"] = {
+                    "feedback": "Evaluation LLM request timed out after 180 seconds.",
+                    "passed": False,
+                }
+                updates_to_state["evaluation_passed"] = False
+                log_run_details(
+                    run_output_dir,
+                    current_attempt,
+                    self.NODE_NAME,
+                    "LLM Timeout",
+                    "Evaluation request timed out after 180 seconds.",
+                    is_error=True,
+                )
+                return updates_to_state
+
+            # Get the content from the response
+            content = response.content if hasattr(response, "content") else None
+            if not content:
+                error_message = f"Evaluation failed: No response content received from LLM."
+                logger.error(error_message)
+                log_run_details(
+                    run_output_dir,
+                    current_attempt,
+                    self.NODE_NAME,
+                    "LLM Error",
+                    error_message,
+                    is_error=True,
+                )
+                updates_to_state["evaluation_result"] = {"feedback": error_message, "passed": False}
+                updates_to_state["evaluation_passed"] = False
+                return updates_to_state
+
+            # Log the raw LLM response
             log_run_details(
                 run_output_dir,
                 current_attempt,
                 self.NODE_NAME,
                 "LLM Response",
-                response_text,
+                f"Raw LLM Response: {content}",
             )
 
             # Parse the response using the robust JsonOutputParser
@@ -384,7 +426,7 @@ class ManimVideoEvaluator:
                     "Parse Result",
                     "Attempting to parse JSON output using JsonOutputParser.",
                 )
-                parsed_result = self.parser.parse(response_text)
+                parsed_result = self.parser.parse(content)
 
                 # Check the type of the parsed result
                 if isinstance(parsed_result, EvaluationResult):
@@ -440,7 +482,7 @@ class ManimVideoEvaluator:
                     f"Evaluation completed. Pass: {updates_to_state['evaluation_passed']}",
                 )
             except OutputParserException as pe:
-                error_message = f"Evaluation failed: Could not parse LLM response using JsonOutputParser: {pe}\nRaw Response: {response_text[:500]}..."
+                error_message = f"Evaluation failed: Could not parse LLM response using JsonOutputParser: {pe}\nRaw Response: {content[:500]}..."
                 logger.error(error_message)
                 log_run_details(
                     run_output_dir,

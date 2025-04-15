@@ -1,6 +1,9 @@
+import os
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from pathlib import Path
+from datetime import datetime
 
 # Assuming SceneIdeator is correctly located and importable
 # Adjust the import path based on your project structure if needed
@@ -40,12 +43,18 @@ async def generate_ideas(request: IdeationRequest):
             f"Received ideation request: input='{request.input_text[:50]}...', other='{str(request.other_info)[:50]}...', initial='{str(request.initial_idea)[:50]}...'"
         )
 
-        # Call the ideator's ideate method
+        # Create a run output directory for this ideation request
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_output_dir = Path("outputs") / f"ideation_{timestamp}"
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Call the ideator's ideate method with run_output_dir
         result: Dict[str, Any] = await ideator.ideate(
             input_text=request.input_text,
             other_info=request.other_info,
             initial_idea=request.initial_idea,
             num_ideas=request.num_ideas,
+            run_output_dir=run_output_dir,
         )
 
         # Extract the ideas and return them in the expected response format

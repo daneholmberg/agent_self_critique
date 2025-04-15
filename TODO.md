@@ -8,8 +8,14 @@
 ---
 
 # Pending Tasks
+- Rubric needs to be stricter on cutoff text and small icons and visuals
 
-- Expand the past mistakes to be a little less concise
+- add rubric to first call
+- 
+- add a process to our ideation tool that grades them on a rubric and possibly improves them? Then returns N number of top distinct results
+
+- add full state to log_run_details?
+
 - I've also made adjustments to how failure reasons (validation_error from execution, feedback from evaluation) are explicitly passed to the summarize_single_failure_node using the conditional edge mapping feature of LangGraph
 - Have a "think to self" node? If we can't get over the hump. To analyze past errors and current rubric. Maybe do this every time and add it to past history.
   - "What did I try, what could i add?"

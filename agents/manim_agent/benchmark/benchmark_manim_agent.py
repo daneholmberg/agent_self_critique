@@ -52,6 +52,14 @@ MMOS as the Active Gateway: The 'Professor' icon seems to 'activate' something. 
 Facilitated Player Access (Clear Source & Flow): Instead of just a cloud appearing near MMOS, bright streams of light or distinct particles (representing players) flow directly out of the activated MMOS logo. This massive stream flows upwards/outwards, forming a huge, dynamic cloud/swarm that surrounds the base and lower slopes of the Puzzle Mountain. This visually confirms MMOS as the source or gateway providing access to the required millions.
 Final View (Clear Relationships): Hold briefly: The tiny remnant of the "previous" scale (optional, could be faded), the imposing Puzzle Mountain (the challenge), the small Professor (the need), the glowing MMOS logo acting as the explicit gateway, and the massive swarm of players flowing from MMOS to address the mountain. The visual story perfectly mirrors the script: unprecedented scale requires millions, Professor connects to MMOS, MMOS facilitates access to the players.""",
     ),
+    (
+        "simple",
+        """Create a simple scene with a single object. But be a little creative. Make it interesting.""",
+    ),
+    (
+        "superSimple",
+        "Create a simple scene with a single circle animated in",
+    ),
 ]
 
 # Define the base output directory for this benchmark run

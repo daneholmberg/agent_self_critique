@@ -1,9 +1,14 @@
 import re
+import json
 import logging
 from typing import Dict, Optional, Tuple, Any, List
 from pathlib import Path
+import asyncio
 
+from pydantic import BaseModel, Field
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.exceptions import OutputParserException
 
 from agents.manim_agent import config as agent_cfg
 from agents.manim_agent.config import ManimAgentState
@@ -59,6 +64,16 @@ MANIM_RULES = """# Manim Cursor Rules
 - Use ShowCreation, it's deprecated for Creation"""
 
 
+# --- Define Pydantic model for structured output ---
+class ManimGenerationOutput(BaseModel):
+    """Pydantic model for structured output from the Manim code generation LLM."""
+
+    thoughts: str = Field(
+        description="Detailed thought process, plan, and reasoning for the generated code."
+    )
+    code: str = Field(description="The complete Python code for the Manim scene.")
+
+
 class ManimCodeGenerator:
     """Handles the generation of Manim Python code using an LLM."""
 
@@ -72,88 +87,69 @@ class ManimCodeGenerator:
         if not llm_text_client:
             raise ValueError("LLM client cannot be None for ManimCodeGenerator")
         self.llm_text_client = llm_text_client
+        self.parser = JsonOutputParser(pydantic_object=ManimGenerationOutput)
         logger.info(
             f"ManimCodeGenerator initialized with LLM: {llm_text_client.__class__.__name__}"
         )
 
-    @staticmethod
-    def _extract_code_and_thoughts(text: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Extracts Python code block (```python ... ```) and thoughts block
-        (```thoughts ... ```) from a string.
-        Handles cases where fences might be missing.
-        """
-        # Use non-greedy matching (.+?) to handle multiple blocks better
-        code_match = re.search(r"```python\n(.+?)```", text, re.DOTALL)
-        extracted_code = code_match.group(1).strip() if code_match else None
-
-        thoughts_match = re.search(r"```thoughts\n(.+?)```", text, re.DOTALL)
-        extracted_thoughts = thoughts_match.group(1).strip() if thoughts_match else None
-
-        # Fallback for code if no ```python block found
-        if not extracted_code:
-            # If thoughts were found, assume code might be the rest of the text
-            if thoughts_match:
-                thoughts_block_text = thoughts_match.group(0)
-                potential_code = text.replace(thoughts_block_text, "").strip()
-                # Basic sanity check for Python code
-                if "import " in potential_code and (
-                    "class " in potential_code or "def " in potential_code
-                ):
-                    extracted_code = potential_code
-                    logger.debug("Extracted code using fallback (found thoughts, took remainder).")
-            # If no code block AND no thoughts block, maybe the whole thing is code?
-            elif "import " in text and ("class " in text or "def " in text):
-                extracted_code = text.strip()
-                logger.debug(
-                    "Extracted code using fallback (no python/thoughts blocks, took whole text)."
-                )
-
-        if not extracted_code:
-            logger.warning("Could not extract Python code block from LLM response.")
-        if not extracted_thoughts:
-            logger.debug("Could not extract thoughts block from LLM response (this might be okay).")
-
-        return extracted_code, extracted_thoughts
-
     async def _build_generation_prompt(self, state: ManimAgentState) -> str:
         """
         Constructs the prompt for the Manim code generation LLM call using ManimAgentState.
+        Relies on `with_structured_output` to handle formatting instructions.
         """
-        # --- Extract Core Information ---
-        task_instruction = state["task_instruction"]  # Current primary instruction
-        context_doc = state.get("context_doc", "")  # Manim Documentation
-        failure_summaries = state.get("failure_summaries", [])  # NEW: Get failure history
-        attempt_number = state.get(
-            "attempt_number", 0
-        )  # Use attempt_number (0-based index of *previous* attempts)
-        scene_name = state.get(
-            "scene_name", agent_cfg.GENERATED_SCENE_NAME
-        )  # Get scene name from state
+        task_instruction = state["task_instruction"]
+        context_doc = state.get("context_doc", "")
+        failure_summaries = state.get("failure_summaries", [])
+        attempt_number = state.get("attempt_number", 0)
+        scene_name = state.get("scene_name", agent_cfg.GENERATED_SCENE_NAME)
+        rubric = state.get("rubric", "")  # Get the rubric for this task
+        reflection_history = state.get("reflection_history", [])  # NEW: Get reflection history
+        latest_reflection_entry = reflection_history[-1] if reflection_history else None
+        latest_reflection = (
+            latest_reflection_entry.get("reflection") if latest_reflection_entry else None
+        )
 
-        # Check if this is the *start* of an enhancement request
         is_initial_enhancement = (
             state.get("previous_code_attempt")
             and state.get("enhancement_request")
-            and attempt_number == 0  # Check attempt_number
+            and attempt_number == 0
         )
-        enhancement_request = state.get("enhancement_request")  # Persistent across retries
+        enhancement_request = state.get("enhancement_request")
 
-        # Use defaults from config if not present in state
         general_context = state.get("general_context", agent_cfg.DEFAULT_GENERATOR_GENERAL_CONTEXT)
-        final_command = state.get("final_command", agent_cfg.DEFAULT_GENERATOR_FINAL_COMMAND)
 
-        # --- Build Prompt ---
+        # MODIFIED: Retrieve template, check if None/empty, then format
+        final_command_template = state.get("final_command")  # Get value, might be None
+        if not final_command_template:
+            logger.debug("No specific final_command in state, using default template.")
+            final_command_template = agent_cfg.DEFAULT_GENERATOR_FINAL_COMMAND
+
+        # Ensure template is valid before formatting
+        if final_command_template and isinstance(final_command_template, str):
+            try:
+                final_command = final_command_template.format(scene_name=scene_name)
+            except KeyError as e:
+                logger.error(
+                    f"Error formatting final_command template: Missing key {e}. Template: '{final_command_template}'"
+                )
+                # Fallback: Use a basic command indicating the error but including the scene name
+                final_command = f"# ERROR: Template formatting failed. Ensure class is {scene_name}.\nGenerate the Python code."
+        else:
+            logger.error(
+                f"Final command template is invalid (None or not a string) even after checking default: {final_command_template}"
+            )
+            # Fallback: Basic command if template is fundamentally broken
+            final_command = f"# ERROR: Invalid command template. Ensure class is {scene_name}.\nGenerate the Python code."
+
         prompt_lines = [
             MANIM_RULES,
-            f"You are a Manim v{agent_cfg.MANIM_VERSION_TARGET} expert tasked with generating Python code for a Manim scene.",  # Use configured version
+            f"You are a Manim v{agent_cfg.MANIM_VERSION_TARGET} expert tasked with generating Python code for a Manim scene.",
             "Follow the instructions in the provided Manim documentation context precisely.",
             "\n--- Manim Documentation Context ---",
             context_doc,
             "--- End Manim Documentation Context ---",
         ]
 
-        # Add General Context if provided
         if general_context:
             prompt_lines.extend(
                 [
@@ -163,46 +159,94 @@ class ManimCodeGenerator:
                 ]
             )
 
-        # --- NEW: Add Failure Summaries History ---
-        if failure_summaries:
-            prompt_lines.append("\n--- History of Failure Summaries for this Task ---")
-            for i, summary in enumerate(failure_summaries):
-                # Add 1 to attempt_number because it's 0-based for *previous* attempts
-                prompt_lines.append(
-                    f"Attempt {i + 1} Failure: {summary}"
-                )  # Label with attempt number
-            prompt_lines.append("--- End History of Failure Summaries ---\n")
+        # --- Combined Reflection and Failure History ---
+        reflection_history = state.get("reflection_history", [])
 
-        # --- Previous Code & Enhancement / Failure Feedback ---
-        # Use state["code"] for the *immediately preceding* attempt's code, if it exists
-        previous_code_this_cycle = state.get("code")
+        if failure_summaries or reflection_history:
+            prompt_lines.append("\n--- History of Past Attempts ---")
+
+            # Create a mapping of attempt numbers to their details
+            attempt_details = {}
+
+            # Populate with failure summaries - they are 0-indexed in the list but represent attempts 1, 2, 3...
+            for i, summary in enumerate(failure_summaries):
+                attempt_num = i + 1  # Convert 0-based index to 1-based attempt number
+                if attempt_num not in attempt_details:
+                    attempt_details[attempt_num] = {"failure": summary, "reflection": None}
+                else:
+                    attempt_details[attempt_num]["failure"] = summary
+
+            # Find the latest reflection attempt number - these are already 1-based in the data
+            latest_reflection_attempt = (
+                max([entry.get("attempt_index", 0) for entry in reflection_history], default=0)
+                if reflection_history
+                else 0
+            )
+
+            # Populate with reflections, excluding the latest one only if we have latest_reflection
+            for entry in reflection_history:
+                attempt_num = entry.get("attempt_index")
+                if attempt_num is not None:
+                    # Only exclude the latest reflection if we'll show it separately
+                    if latest_reflection and attempt_num == latest_reflection_attempt:
+                        continue
+
+                    if attempt_num not in attempt_details:
+                        attempt_details[attempt_num] = {
+                            "failure": None,
+                            "reflection": entry.get("reflection"),
+                        }
+                    else:
+                        attempt_details[attempt_num]["reflection"] = entry.get("reflection")
+
+            # Output the combined history in order
+            for attempt_num in sorted(attempt_details.keys()):
+                details = attempt_details[attempt_num]
+                history_line = f"Attempt {attempt_num}:"
+
+                if details["failure"]:
+                    history_line += f" Failure summary: {details['failure']}"
+                    if details["reflection"]:
+                        history_line += f". "
+
+                if details["reflection"]:
+                    history_line += f" Reflection: {details['reflection']}"
+
+                prompt_lines.append(history_line)
+
+            prompt_lines.append("--- End History of Past Attempts ---\n")
+
+        # --- Special Callout for Latest Reflection ---
+        if latest_reflection:
+            prompt_lines.append("\n--- Reflection on Last Attempt ---")
+            prompt_lines.append(latest_reflection)
+            prompt_lines.append("--- End Reflection on Last Attempt ---\n")
+        # --- End Special Callout ---
+
+        previous_code_this_cycle = state.get(
+            "code"
+        )  # Code from the *immediately preceding* node run in *this* loop
 
         if is_initial_enhancement:
-            # First attempt of an enhancement request - uses 'previous_code_attempt' from input
             original_code_for_enhancement = state.get("previous_code_attempt")
             if original_code_for_enhancement:
                 prompt_lines.append("--- Original Code (For Enhancement) ---")
                 prompt_lines.append(f"```python\n{original_code_for_enhancement}\n```")
                 prompt_lines.append("--- End Original Code ---")
             else:
-                logger.warning(
-                    "Enhancement requested but no 'previous_code_attempt' provided in initial state."
-                )
+                logger.warning("Enhancement requested but no 'previous_code_attempt' provided.")
 
             prompt_lines.append("\n--- Requested Enhancements ---")
             prompt_lines.append(enhancement_request)
             prompt_lines.append("--- End Requested Enhancements ---")
             prompt_lines.append("\nPlease enhance the original code based on the request above.")
 
-        elif attempt_number > 0:  # Check attempt_number
-            # This is a retry attempt (attempt_number > 0)
+        elif attempt_number > 0:
+            fail_header = (
+                "Failed Enhancement Attempt" if enhancement_request else "Failed Code Attempt"
+            )
             if previous_code_this_cycle:
-                fail_header = (
-                    "Failed Enhancement Attempt" if enhancement_request else "Failed Code Attempt"
-                )
-                prompt_lines.append(
-                    f"\n--- {fail_header} (Attempt {attempt_number}) --- "  # Use attempt_number
-                )
+                prompt_lines.append(f"\n--- {fail_header} (Attempt {attempt_number}) --- ")
                 prompt_lines.append(f"```python\n{previous_code_this_cycle}\n```")
                 prompt_lines.append(f"--- End {fail_header} ---")
             else:
@@ -210,391 +254,459 @@ class ManimCodeGenerator:
                     f"\n--- Failed Attempt {attempt_number} (No Code from Previous Cycle Available) --- "
                 )
 
-            # --- NEW: Add Detailed Error from Last Execution Attempt ---
-            if state.get("execution_success") is False:
+            # --- Detailed Error/Feedback ---
+            execution_success = state.get("execution_success")
+            evaluation_passed = state.get("evaluation_passed")
+
+            logger.info(
+                f"State values in prompt builder - execution_success: {execution_success}, evaluation_passed: {evaluation_passed}"
+            )
+
+            # Check for execution error first
+            if execution_success is False:
                 detailed_error = state.get("validation_error")
                 if detailed_error:
                     prompt_lines.append("\n--- Detailed Error from Last Execution Attempt ---")
                     prompt_lines.append(detailed_error)
                     prompt_lines.append("--- End Detailed Error ---")
+            # Only check evaluation if we know it failed AND execution didn't explicitly fail
+            elif evaluation_passed is False and execution_success is not False:
+                evaluation_result_dict = state.get("evaluation_result")
+                if evaluation_result_dict is not None:
+                    detailed_feedback = evaluation_result_dict.get("feedback")
+                    if detailed_feedback:
+                        prompt_lines.append(
+                            "\n--- Detailed Feedback from Last Evaluation Attempt ---"
+                        )
+                        prompt_lines.append(detailed_feedback)
+                        prompt_lines.append("--- End Detailed Feedback ---")
                 else:
-                    logger.warning(
-                        f"Execution success is False for attempt {attempt_number}, but no detailed 'validation_error' found in state."
-                    )
-            # --- End Detailed Error Section ---
+                    logger.warning("evaluation_passed is False but evaluation_result_dict is None")
+            # --- End Detailed Error/Feedback ---
 
-            # --- NEW: Add Detailed Feedback from Last Evaluation Attempt ---
-            elif state.get("evaluation_passed") is False:
-                evaluation_result_dict = state.get("evaluation_result", {})
-                detailed_feedback = evaluation_result_dict.get("feedback")
-                if detailed_feedback:
-                    prompt_lines.append("\n--- Detailed Feedback from Last Evaluation Attempt ---")
-                    prompt_lines.append(detailed_feedback)
-                    prompt_lines.append("--- End Detailed Feedback ---")
-                else:
-                    # This case might happen if evaluation_passed is False but the feedback is missing/empty
-                    logger.warning(
-                        f"Evaluation passed is False for attempt {attempt_number}, but no detailed 'feedback' found in evaluation_result."
-                    )
-            # --- End Detailed Feedback Section ---
-
-            # Add specific feedback based on whether it's an enhancement retry or not
             if enhancement_request:
                 prompt_lines.append("\n--- Enhancement Request (Ongoing) ---")
                 prompt_lines.append(enhancement_request)
                 prompt_lines.append("--- End Enhancement Request ---")
 
             prompt_lines.append(
-                "\nPlease analyze the failure summaries, the DETAILED ERROR MESSAGE above (if provided), and the previous code attempt (if shown), then generate corrected code based on the original task and any enhancement requests."
+                "Please analyze the failure summaries, the LATEST REFLECTION, the DETAILED ERROR/FEEDBACK MESSAGE above (if provided), and the previous code attempt (if shown)."
+            )
+            prompt_lines.append(
+                "Generate corrected code based on the original task and any enhancement requests."
             )
 
-        # --- End Previous Code / Feedback ---
+        # --- Include Rubric for Guidance ---
+        # Only show rubric if:
+        # 1. It's the first run (attempt_number == 0), or
+        # 2. There was an error in execution or evaluation failed
+        # 3. But don't show it if we already have evaluation results with feedback
+        show_rubric = False
 
-        prompt_lines.append("\n--- Primary Task Instruction ---")
-        prompt_lines.append(f'"""\n{task_instruction}\n"""')  # Use the core task instruction
-        prompt_lines.append("--- End Primary Task Instruction ---")
+        if rubric:
+            # First run - always show rubric
+            if attempt_number == 0:
+                show_rubric = True
+            # Error/failure cases - show rubric to help fix issues
+            elif state.get("execution_success") is False or state.get("evaluation_passed") is False:
+                # But don't show it if we have detailed evaluation feedback
+                evaluation_result_dict = state.get("evaluation_result", {})
+                detailed_feedback = evaluation_result_dict.get("feedback")
+                if not detailed_feedback:
+                    show_rubric = True
 
-        # --- Determine Final Action Command ---
-        # Get the base command template (either default or user-provided)
-        final_command_template = state.get(
-            "final_command", agent_cfg.DEFAULT_GENERATOR_FINAL_COMMAND
-        )
-
-        task_content = None
-        if attempt_number > 0:  # Check attempt_number
-            # Adding 1 to attempt_number for logging the *upcoming* attempt number
-            logger.info(f"Attempt {attempt_number + 1}, attempting to generate refined task.")
-            # Call the helper to get the refined task
-            # The refiner is instructed to include the scene name
-            task_content = await self._generate_refined_task(state)
-
-        # Fallback if refinement wasn't attempted or failed
-        if not task_content:
-            logger.info("Using base final command template (no refinement or refinement failed).")
-            # Format the base template with the scene name from state
-            try:
-                task_content = final_command_template.format(scene_name=scene_name)
-            except KeyError:
-                # If the template doesn't have {scene_name}, use it as is but log a warning
-                logger.warning(
-                    f'Provided final_command template does not contain a {{scene_name}} placeholder. Using it as is: "{final_command_template}"'
+            if show_rubric:
+                prompt_lines.append("\n--- Evaluation Rubric ---")
+                prompt_lines.append(rubric)
+                prompt_lines.append("--- End Evaluation Rubric ---\n")
+                prompt_lines.append(
+                    "Use the above rubric as a guide for generating code that will pass evaluation."
                 )
-                # Add explicit instruction about scene name *after* the user's command
-                task_content = f"{final_command_template}\n\nCRITICAL: Ensure the generated code defines a class named '{scene_name}'."
-        else:
-            # If refinement succeeded, task_content already contains the refined command
-            # (which should include the scene name instruction from the refiner prompt)
-            logger.info(f"Using refined task instruction: {task_content[:100]}...")
+        # -----------------------------------
 
-        # --- Append Final Action Command ---
-        prompt_lines.append(f"\n--- Action Command --- ")
-        prompt_lines.append(task_content.strip())
-        prompt_lines.append("--- End Action Command ---")
-
-        # Final instruction on output format
-        prompt_lines.append(
-            "\nGenerate the complete Python code for the scene, enclosed in ```python ... ``` markers."
-            # " Additionally, provide your thought process, reflections on previous attempts (drawing from the failure summaries), and plan for this generation attempt in a separate ```thoughts ... ``` block. Focus on addressing the past failures." # Kept for potential future use
+        # --- Primary Task Instruction ---
+        prompt_lines.extend(
+            [
+                "\n--- Primary Task Instruction ---",
+                task_instruction,
+                "--- End Primary Task Instruction ---\n",
+            ]
         )
+
+        # --- Final Command (Updated for JSON output) ---
+        prompt_lines.append(final_command)  # Already formatted with scene_name
+
+        # Add explicit JSON formatting instructions
+        prompt_lines.append("\nResponse MUST be a valid JSON object with the following structure:")
+        prompt_lines.append("")
+        prompt_lines.append("{")
+        prompt_lines.append(
+            '  "thoughts": "Your detailed thought process and plan for the generated code",'
+        )
+        prompt_lines.append('  "code": "The complete Python code for the Manim scene"')
+        prompt_lines.append("}")
+        prompt_lines.append(
+            "THIS IS OF THE UTMOST IMPORTANCE. IT MUST BE VALID JSON. NO language mixing, JUST VALID JSON."
+        )
+
+        prompt_lines.append(
+            "\nGenerate the Manim code based on the provided context, history, and instructions. Remember that it HAS to be valid JSON. No pythonic triple quotes, just valid JSON."
+        )
+
         return "\n".join(prompt_lines)
 
-    async def _generate_refined_task(self, state: ManimAgentState) -> Optional[str]:
+    def clean_json_response(self, content: str) -> str:
         """
-        Uses the LLM to generate a refined, specific task instruction based on
-        previous errors or feedback.
+        Remove markdown formatting and extract the JSON object from LLM response.
 
         Args:
-            state: The current ManimAgentState containing feedback.
+            content: The raw LLM response string
 
         Returns:
-            The refined task string, or None if no feedback exists or an error occurs.
+            A cleaned string containing only the JSON content
         """
-        node_name = "CodeGenerator_TaskRefiner"
-        run_output_dir = Path(state["run_output_dir"])
-        # current_attempt is the number for the upcoming attempt (1-based)
-        current_attempt = state.get("attempt_number", 0) + 1
+        # Remove markdown code block markers if present
+        if "```json" in content and "```" in content.split("```json", 1)[1]:
+            # Extract content between ```json and the next ```
+            content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+        elif "```" in content:
+            # Handle case where json keyword might be missing
+            content = content.split("```", 1)[1].split("```", 1)[0].strip()
 
-        logger.info("Attempting to generate refined task instruction.")
-        validation_error = state.get("validation_error")
-        evaluation_result = state.get("evaluation_result")
-        evaluation_feedback = evaluation_result.get("feedback") if evaluation_result else None
-        failure_summaries = state.get("failure_summaries", [])
-        scene_name = state.get("scene_name", agent_cfg.GENERATED_SCENE_NAME)  # Get scene name
+        # Ensure the content starts with a curly brace
+        if not content.strip().startswith("{"):
+            # Try to extract content between curly braces as fallback
+            match = re.search(r"(\{.*\})", content, re.DOTALL)
+            if match:
+                content = match.group(1)
 
-        if not (validation_error or evaluation_feedback or failure_summaries):
-            logger.warning("_generate_refined_task called without any feedback or summaries.")
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Warning",
-                "_generate_refined_task called without any feedback or summaries. Skipping refinement.",
-                is_error=True,
-            )
-            return None
-
-        formatted_summaries = "\n".join([f"- {s}" for s in failure_summaries])
-        if not formatted_summaries:
-            formatted_summaries = "None"
-
-        initial_goal = state.get("task_instruction", "[Task Instruction Missing]")
-        enhancement_request = state.get("enhancement_request")
-
-        summarizer_prompt = f"""
-        You are an expert prompt engineer assisting in a multi-turn AI workflow. Your goal is to refine the final 'Action Command' instruction for a Manim code generation AI based on the outcome of its previous attempt(s), considering the initial goal and any requested enhancements.
-
-        
-
-        **Context Provided to Code Generation AI (Before the Command You Generate):**
-        1. Manim programming rules and best practices.
-        2. Relevant Manim documentation excerpts.
-        3. General context about the overall video/animation goal.
-        4. A history of concise failure summaries from past attempts.
-        5. The specific code from the *immediately preceding* failed attempt (if available).
-        6. (If applicable) The specific text detailing any ongoing enhancement request.
-
-        **Your Input for Refinement:**
-        - # Add full context here, either rubric with answers on why it didn't pass or a detailed error message
-        - Initial Primary Task Instruction: "{initial_goal}"
-        - Enhancement Request (if applicable): "{enhancement_request or 'None'}"
-        - Historical Failure Summaries:\n{formatted_summaries}
-        - Validation Error (from LATEST attempt, if any): "{validation_error or 'None'}"
-        - Evaluation Feedback (from LATEST attempt, if any): "{evaluation_feedback or 'None'}"
-
-        This refined 'Action Command' instruction will be placed at the *very end* of the main prompt given to the code generation AI. It's crucial that this instruction is clear, actionable, and leverages the context the code generation AI has already received (including Failure Summaries provided earlier in the prompt). NOTE THAT YOU SHOULD NOT INCLUDE INSTRUCTIONS ON HOW TO FIX ERRORS, ONLY REFER TO THE ERROR AND THE HISTORY OF FAILURES.
-
-        **Your Task:**
-        Generate ONLY the text content for the final 'Action Command' instruction. Apply strong prompt engineering principles:
-        - Synthesize the 'Initial Primary Task Instruction' and the 'Enhancement Request' (if provided) to understand the *current* desired outcome.
-        - Analyze the **Historical Failure Summaries** to identify any recurring issues or patterns.
-        - Analyze the **Validation Error** and **Evaluation Feedback** to identify any specific issues.
-        - Be specific about the *fixes* needed, directly referencing the key issues from the **latest** validation error and/or evaluation feedback, but also consider addressing any **persistent problems** revealed by the history. Focus on creating a single, actionable command for the *next* attempt.
-        But again, do not offer specific solutions about how to fix the error.
-        - Clearly reiterate the core objective (incorporating the enhancement if applicable).
-        - **CRITICAL**: Ensure the generated command explicitly instructs the code generation AI to define a Python class named '{scene_name}'.
-        - Ensure the instruction is concise and guides the code generation AI effectively on its *next* attempt to achieve the desired outcome while fixing the errors described (both latest and historical patterns).
-        - Do **not** include the `--- Action Command ---` or `--- End Action Command ---` markers in your output. Just provide the instruction text itself.
-        """
-
-        refiner_prompt_log_path = run_output_dir / f"task_refiner_prompt_iter_{current_attempt}.txt"
-        try:
-            with open(refiner_prompt_log_path, "w", encoding="utf-8") as f:
-                f.write(summarizer_prompt)
-            logger.info(f"Task refiner prompt saved to: {refiner_prompt_log_path}")
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Refiner LLM Prompt",
-                summarizer_prompt,
-            )
-        except Exception as log_e:
-            logger.warning(f"Could not save task refiner prompt log: {log_e}")
-
-        try:
-            logger.info(f"Calling Task Refiner LLM: {self.llm_text_client.__class__.__name__}")
-            response = await self.llm_text_client.ainvoke(
-                summarizer_prompt, config={"configurable": {"temperature": 0.3}}
-            )
-            refined_task = (
-                response.content.strip() if hasattr(response, "content") else str(response).strip()
-            )
-
-            refiner_resp_log_path = (
-                run_output_dir / f"task_refiner_response_iter_{current_attempt}.txt"
-            )
-            try:
-                with open(refiner_resp_log_path, "w", encoding="utf-8") as f:
-                    f.write(refined_task)
-                logger.info(f"Task refiner response saved to: {refiner_resp_log_path}")
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Refiner LLM Response",
-                    refined_task,
-                )
-            except Exception as log_e:
-                logger.warning(f"Could not save task refiner response log: {log_e}")
-
-            if refined_task:
-                logger.info(f"Successfully generated refined task: {refined_task[:100]}...")
-                return refined_task
-            else:
-                logger.warning("Task Refiner LLM returned empty content. Falling back.")
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Refiner Warning",
-                    "Task Refiner LLM returned empty content. Falling back to default command.",
-                    is_error=True,
-                )
-                return None
-
-        except Exception as e:
-            logger.error(f"Error calling Task Refiner LLM: {e}", exc_info=True)
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Refiner LLM Error",
-                f"Error: {e}",
-                is_error=True,
-            )
-            return None
+        return content
 
     async def generate_manim_code(self, state: ManimAgentState) -> Dict[str, Any]:
         """
-        Generates Manim code based on the current state.
+        Generates Manim code based on the current state, using JSON output parsing.
+        Uses JsonOutputParser with the Pydantic model ManimGenerationOutput for robust parsing.
+        Updates the state with the generated code and generation history.
 
         Args:
             state: The current ManimAgentState.
 
         Returns:
-            A dictionary containing the generated code under the key "code",
-            or an error message under "error_message" or "validation_error".
+            A dictionary containing the updated state fields: 'code', 'generation_history'.
+            Returns {'error_message': ...} if generation fails critically.
         """
-        node_name = "ManimCodeGenerator"
-        run_output_dir = Path(state["run_output_dir"])
-        # current_attempt is the number for *this* generation attempt (1-based)
-        current_attempt = state.get("attempt_number", 0) + 1
+        logger.info("Starting Manim code generation using JSON parsing...")
+        attempt_number = state.get("attempt_number", 0)  # Get current attempt number
+        node_name = "ManimCodeGenerator"  # Define node_name for logging
+        run_output_dir = state.get("run_output_dir", ".")  # Extract run_output_dir from state
 
+        # --- Log Node Entry ---
         log_run_details(
-            run_output_dir,
-            current_attempt,
-            node_name,
-            "Node Entry",
-            f"Starting {node_name} - Attempt {current_attempt}",
+            run_output_dir=run_output_dir,
+            attempt_number=attempt_number + 1,
+            node_name=node_name,
+            log_category="Node Entry",
+            content=f"Starting {node_name} - Attempt {attempt_number + 1}",
         )
+        # ----------------------
 
-        updates_to_state: Dict[str, Any] = {
-            "code": None,
-            "validation_error": None,
-            "error_message": None,
-            "run_output_dir": str(run_output_dir),
-            "scene_name": state.get("scene_name"),
-            "save_generated_code": state.get("save_generated_code"),
-        }
+        # --- Initialize Histories if they don't exist ---
+        generation_history = state.get("generation_history", [])
+        reflection_history = state.get(
+            "reflection_history", []
+        )  # Ensure it exists, though we don't modify it here
 
         try:
+            # 1. Build the prompt
             prompt = await self._build_generation_prompt(state)
-            prompt_log_path = run_output_dir / f"code_gen_prompt_iter_{current_attempt}.txt"
-            with open(prompt_log_path, "w", encoding="utf-8") as f:
-                f.write(prompt)
-            logger.info(f"Generation prompt saved to: {prompt_log_path}")
+            logger.debug(
+                f"Generation prompt created (Attempt {attempt_number + 1}): {prompt[:500]}..."
+            )  # Log start of prompt
+
+            # --- Log the full prompt before sending ---
             log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "LLM Prompt",
-                prompt,
+                run_output_dir=run_output_dir,
+                attempt_number=attempt_number + 1,
+                node_name=node_name,
+                log_category="LLM Prompt",
+                content=f"Generator prompt for attempt {attempt_number + 1}:\n---\n{prompt}\n---",
             )
+            # -------------------------------------------
 
-            response = await self.llm_text_client.ainvoke(prompt)
-            llm_response_text = response.content if hasattr(response, "content") else str(response)
-
-            response_log_path = run_output_dir / f"code_gen_response_iter_{current_attempt}.txt"
-            with open(response_log_path, "w", encoding="utf-8") as f:
-                f.write(llm_response_text)
-            logger.info(f"Generation response saved to: {response_log_path}")
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "LLM Response",
-                llm_response_text,
-            )
-
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Parsing",
-                "Parsing LLM response for code and thoughts...",
-            )
-
-            generated_code, llm_thoughts = self._extract_code_and_thoughts(llm_response_text)
-
-            if not generated_code:
-                error_message = (
-                    "Failed to parse Python code block (```python ... ```) from LLM response."
-                )
-                logger.error(error_message)
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Parsing Error",
-                    error_message,
-                    is_error=True,
-                )
-                updates_to_state["error_message"] = error_message
-                return updates_to_state
-
-            scene_name = state.get("scene_name", agent_cfg.GENERATED_SCENE_NAME)
-            expected_class_pattern = rf"class\s+{re.escape(scene_name)}\s*\(.*Scene.*\):"
-            if not re.search(expected_class_pattern, generated_code):
-                error_message = f"Generated code missing correct Scene class definition inheriting from Scene: expected similar to 'class {scene_name}(Scene):'."
-                logger.error(error_message)
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Validation Error",
-                    error_message,
-                    is_error=True,
-                )
-                updates_to_state["validation_error"] = error_message
-                return updates_to_state
-
+            # 2. Call the LLM expecting the JSON output
+            # Add timeout to prevent hanging
             try:
-                compile(generated_code, "<string>", "exec")
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Syntax Check",
-                    "Passed basic Python syntax check.",
+                # Create a task with an explicit timeout
+                llm_task = asyncio.create_task(self.llm_text_client.ainvoke(prompt))
+                llm_response = await asyncio.wait_for(llm_task, timeout=180)  # 3 minute timeout
+                logger.info(
+                    f"LLM response received within timeout for attempt {attempt_number + 1}"
                 )
-            except SyntaxError as e:
-                error_message = f"Generated code has SyntaxError: {e}"
-                logger.error(error_message)
-                log_run_details(
-                    run_output_dir,
-                    current_attempt,
-                    node_name,
-                    "Syntax Error",
-                    error_message,
-                    is_error=True,
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"LLM request timed out after 180 seconds for attempt {attempt_number + 1}"
                 )
-                updates_to_state["validation_error"] = error_message
-                return updates_to_state
+                return {
+                    "error_message": "LLM request timed out after 180 seconds. Please try again.",
+                    "generation_history": generation_history,
+                    "reflection_history": reflection_history,
+                    "code": None,
+                }
 
-            logger.info(f"Successfully generated and validated code (attempt {current_attempt}).")
-            updates_to_state["code"] = generated_code
-            updates_to_state["validation_error"] = None
-            updates_to_state["error_message"] = None
-
-            log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Node Completion",
-                "Code generation and basic validation successful.",
+            # Get the content from the response
+            content = (
+                llm_response.content if hasattr(llm_response, "content") else str(llm_response)
             )
 
-        except Exception as e:
-            error_message = f"Unexpected error during Manim code generation: {e}"
-            logger.error(error_message, exc_info=True)
+            if not content:
+                logger.error(f"LLM returned empty content for attempt {attempt_number + 1}")
+                return {
+                    "error_message": "LLM returned empty content. Please try again.",
+                    "generation_history": generation_history,
+                    "reflection_history": reflection_history,
+                    "code": None,
+                }
+
+            # Log the raw response
             log_run_details(
-                run_output_dir,
-                current_attempt,
-                node_name,
-                "Generator Error",
-                error_message,
+                run_output_dir=run_output_dir,
+                attempt_number=attempt_number + 1,
+                node_name=node_name,
+                log_category="LLM Raw Response",
+                content=f"Raw LLM Response: {content}",
+            )
+
+            # Clean and preprocess the response
+            cleaned_content = self.clean_json_response(content)
+            log_run_details(
+                run_output_dir=run_output_dir,
+                attempt_number=attempt_number + 1,
+                node_name=node_name,
+                log_category="Preprocessed Response",
+                content=f"Preprocessed response for parsing: {cleaned_content}...",
+            )
+
+            # 3. Parse the response using JsonOutputParser
+            try:
+                log_run_details(
+                    run_output_dir=run_output_dir,
+                    attempt_number=attempt_number + 1,
+                    node_name=node_name,
+                    log_category="Parse Result",
+                    content="Attempting to parse JSON output using JsonOutputParser.",
+                )
+                # Parse the cleaned content instead of raw content
+                parsed_result = self.parser.parse(cleaned_content)
+
+                # Check the type of the parsed result
+                if isinstance(parsed_result, ManimGenerationOutput):
+                    logger.info(
+                        f"Generation result (Pydantic): Thoughts length={len(parsed_result.thoughts)}, Code length: {len(parsed_result.code)}"
+                    )
+                    extracted_thoughts = parsed_result.thoughts
+                    extracted_code = parsed_result.code
+                elif isinstance(parsed_result, dict):
+                    logger.warning(
+                        f"Parsed result as dict (Pydantic validation might have partially failed): {parsed_result.keys()}"
+                    )
+                    # Attempt to access keys, default to empty/error message if missing
+                    extracted_thoughts = parsed_result.get("thoughts", "No thoughts provided")
+                    extracted_code = parsed_result.get("code")
+
+                    # Log potentially missing keys
+                    if "thoughts" not in parsed_result or "code" not in parsed_result:
+                        logger.error(
+                            f"Parsed dict missing 'thoughts' or 'code' key: {parsed_result}"
+                        )
+                        log_run_details(
+                            run_output_dir=run_output_dir,
+                            attempt_number=attempt_number + 1,
+                            node_name=node_name,
+                            log_category="Parse Warning",
+                            content=f"Parsed dict missing 'thoughts' or 'code' key: {parsed_result}",
+                            is_error=True,
+                        )
+
+                    # Check specifically for missing code
+                    if not extracted_code:
+                        logger.error("Parsed response missing 'code' field")
+                        raise ValueError("Parsed response missing 'code' field")
+                else:
+                    # This case should ideally not happen if parser works as expected
+                    raise TypeError(f"Unexpected parsed result type: {type(parsed_result)}")
+
+                # Log the structured content
+                log_run_details(
+                    run_output_dir=run_output_dir,
+                    attempt_number=attempt_number + 1,
+                    node_name=node_name,
+                    log_category="Parsed Content",
+                    content=f"Parsed content for attempt {attempt_number + 1}:\n\n--- Thoughts ---\n{extracted_thoughts}\n\n--- Generated Code ---\n{extracted_code}",
+                )
+
+                # 4. Update Generation History
+                new_generation_entry = {
+                    "attempt_index": attempt_number + 1,  # History uses 1-based index
+                    "thoughts": extracted_thoughts,
+                    "code": extracted_code,
+                }
+                generation_history.append(new_generation_entry)
+
+                # 5. Prepare state update
+                update_dict = {
+                    "code": extracted_code,
+                    "generation_history": generation_history,
+                    # Pass reflection history through unchanged
+                    "reflection_history": reflection_history,
+                    # Clear any previous error message specific to this node
+                    "error_message": None,
+                }
+
+                # --- Log Node Success ---
+                log_run_details(
+                    run_output_dir=run_output_dir,
+                    attempt_number=attempt_number + 1,
+                    node_name=node_name,
+                    log_category="Node Completion",
+                    content=f"Code generation successful for attempt {attempt_number + 1}.",
+                )
+                # ------------------------
+
+                logger.info(f"Code generation successful for attempt {attempt_number + 1}.")
+                return update_dict
+
+            except OutputParserException as pe:
+                # Try fallback parsing if possible
+                fallback_error = True
+                fallback_dict = None
+
+                try:
+                    # Last resort: try standard json module
+                    fallback_dict = json.loads(cleaned_content)
+                    log_run_details(
+                        run_output_dir=run_output_dir,
+                        attempt_number=attempt_number + 1,
+                        node_name=node_name,
+                        log_category="Fallback Parsing",
+                        content="Used fallback json.loads() parsing successfully",
+                    )
+                    fallback_error = False
+                except json.JSONDecodeError:
+                    pass
+
+                if not fallback_error and fallback_dict:
+                    # Handle successful fallback parsing
+                    extracted_thoughts = fallback_dict.get("thoughts", "No thoughts provided")
+                    extracted_code = fallback_dict.get("code")
+
+                    if not extracted_code:
+                        error_message = "Fallback parsing succeeded but 'code' field is missing"
+                        logger.error(error_message)
+                        log_run_details(
+                            run_output_dir=run_output_dir,
+                            attempt_number=attempt_number + 1,
+                            node_name=node_name,
+                            log_category="Parse Error",
+                            content=error_message,
+                            is_error=True,
+                        )
+                    else:
+                        # Success with fallback parsing
+                        log_run_details(
+                            run_output_dir=run_output_dir,
+                            attempt_number=attempt_number + 1,
+                            node_name=node_name,
+                            log_category="Fallback Success",
+                            content=f"Successfully parsed with fallback method. Code length: {len(extracted_code)}",
+                        )
+
+                        # Update generation history
+                        new_generation_entry = {
+                            "attempt_index": attempt_number + 1,
+                            "thoughts": extracted_thoughts,
+                            "code": extracted_code,
+                        }
+                        generation_history.append(new_generation_entry)
+
+                        return {
+                            "code": extracted_code,
+                            "generation_history": generation_history,
+                            "reflection_history": reflection_history,
+                            "error_message": None,
+                        }
+                else:
+                    error_message = f"Failed to parse LLM response using all methods: {pe}\nRaw Response: {content[:500]}..."
+                    logger.error(error_message)
+                    log_run_details(
+                        run_output_dir=run_output_dir,
+                        attempt_number=attempt_number + 1,
+                        node_name=node_name,
+                        log_category="Parse Error",
+                        content=error_message,
+                        is_error=True,
+                    )
+                    return {
+                        "error_message": error_message,
+                        "generation_history": generation_history,
+                        "reflection_history": reflection_history,
+                        "code": None,
+                    }
+            except (ValueError, TypeError) as e:
+                error_message = f"Error processing parsed result: {e}"
+                logger.error(error_message)
+                log_run_details(
+                    run_output_dir=run_output_dir,
+                    attempt_number=attempt_number + 1,
+                    node_name=node_name,
+                    log_category="Parse Error",
+                    content=error_message,
+                    is_error=True,
+                )
+                return {
+                    "error_message": error_message,
+                    "generation_history": generation_history,
+                    "reflection_history": reflection_history,
+                    "code": None,
+                }
+
+        except Exception as e:  # Catch any other unexpected errors
+            # --- Log Node Error ---
+            error_message_detail = f"Attempt {attempt_number + 1} failed: {e}"
+            log_run_details(
+                run_output_dir=run_output_dir,
+                attempt_number=attempt_number + 1,
+                node_name=node_name,
+                log_category="Generator Error",
+                content=error_message_detail,
                 is_error=True,
             )
-            updates_to_state["validation_error"] = f"[Generator Internal Error] {error_message}"
+            # ----------------------
 
-        return updates_to_state
+            logger.exception(
+                f"An unexpected error occurred during code generation (Attempt {attempt_number + 1}): {e}",
+                exc_info=True,
+            )
+            error_message = f"Code generation failed: {e}"
+
+            return {
+                "error_message": error_message,
+                # Pass histories back
+                "generation_history": generation_history,
+                "reflection_history": reflection_history,
+                "code": None,  # Ensure code is None on error
+            }
+
+
+# --- Helper function (Consider moving to utils if reused) ---
+def extract_scene_name(code: str) -> Optional[str]:
+    """Extracts the first Manim Scene class name from the code."""
+    # Regex to find class definitions inheriting from Scene (or subclasses like MovingCameraScene)
+    match = re.search(r"class\s+([\\w\\d_]+)\\s*\\(\\s*(?:\\w*\\.)?Scene\\s*\\):", code)
+    if match:
+        return match.group(1)
+    # Fallback for other scene types if needed
+    match = re.search(r"class\s+([\\w\\d_]+)\\s*\\(.*Scene.*\\):", code)
+    if match:
+        return match.group(1)
+    logger.warning("Could not automatically extract Scene name from generated code.")
+    return None  # Return None if no scene name found
